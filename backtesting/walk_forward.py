@@ -37,6 +37,10 @@ class WalkForwardConfig:
     account_size: float = 1_000_000.0
     margin_per_lot: float = 75_000.0
     max_risk_per_trade: float = 0.02
+    # RL options
+    use_rl: bool = True
+    rl_use_ensemble: bool = True
+    rl_algorithm: str = "ENSEMBLE"
     
     # Model retraining options
     retrain_each_segment: bool = True  # Retrain model for each segment
@@ -269,7 +273,10 @@ class WalkForwardTester:
             min_confidence=self.config.min_confidence,
             account_size=self.config.account_size,
             margin_per_lot=self.config.margin_per_lot,
-            max_risk_per_trade=self.config.max_risk_per_trade
+            max_risk_per_trade=self.config.max_risk_per_trade,
+            use_rl=self.config.use_rl,
+            rl_use_ensemble=self.config.rl_use_ensemble,
+            rl_algorithm=self.config.rl_algorithm
         )
         
         # Run backtest

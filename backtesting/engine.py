@@ -21,6 +21,8 @@ from feature_engineering import REQUIRED_FEATURE_COLUMNS, FeatureEngineeringErro
 from ml_core import MLSignalGenerator
 from risk_manager import calculate_trading_metrics, get_optimal_position_size
 from backtesting.monte_carlo import MonteCarloTester
+from execution.strategy_router import AdvancedStrategyRouter, StrategySignal
+from models.reinforcement_learning import RLState
 
 LOGGER = logging.getLogger(__name__)
 
@@ -59,6 +61,10 @@ class BacktestConfig:
     margin_per_lot: float = 75_000.0
     max_risk_per_trade: float = 0.02
     limit_rows: Optional[int] = None
+    # RL options for walk-forward/backtest
+    use_rl: bool = False
+    rl_use_ensemble: bool = False
+    rl_algorithm: str = "PPO"
 
     def __post_init__(self) -> None:
         self.start = _ensure_date(self.start)
@@ -120,6 +126,14 @@ class BacktestResult:
 class BacktestEngine:
     def __init__(self, config: BacktestConfig):
         self.config = config
+        # If RL is enabled, use the strategy router (includes RL/DL/LGBM)
+        if self.config.use_rl:
+            self.router = AdvancedStrategyRouter(config.exchange)
+            # Prefer ensemble when requested
+            if self.config.rl_use_ensemble:
+                self.router.routing_mode = 'ensemble'
+        else:
+            self.router = None
         self.signal_engine = MLSignalGenerator(config.exchange)
 
     def run(self) -> BacktestResult:
@@ -149,7 +163,26 @@ class BacktestEngine:
                 break
 
             features = {col: float(row.get(col, 0.0)) for col in REQUIRED_FEATURE_COLUMNS}
-            signal, confidence, rationale, metadata = self.signal_engine.generate_signal(features)
+
+            # Use RL-aware router if enabled; else fallback to MLSignalGenerator
+            if self.router:
+                rl_state = RLState(
+                    features=np.array(list(features.values()), dtype=float),
+                    current_position=0.0,
+                    portfolio_value=self.config.account_size,
+                    timestamp=str(row.get('timestamp'))
+                )
+                sig_obj: StrategySignal = self.router.generate_signal(
+                    features_dict=features,
+                    feature_sequence=None,
+                    state=rl_state
+                )
+                signal = sig_obj.signal
+                confidence = float(sig_obj.confidence)
+                rationale = sig_obj.rationale
+                metadata = sig_obj.metadata
+            else:
+                signal, confidence, rationale, metadata = self.signal_engine.generate_signal(features)
 
             if signal == 'HOLD' or confidence < self.config.min_confidence:
                 continue
@@ -158,10 +191,17 @@ class BacktestEngine:
             if direction == 0:
                 continue
 
+            # Risk inputs: fallback defaults if router is used and no metrics available
+            win_rate = 0.55
+            avg_wl = 1.0
+            if not self.router and hasattr(self.signal_engine, "strategy_metrics"):
+                win_rate = self.signal_engine.strategy_metrics.get('win_rate', win_rate)
+                avg_wl = self.signal_engine.strategy_metrics.get('avg_w_l_ratio', avg_wl)
+
             risk = get_optimal_position_size(
                 ml_confidence=confidence,
-                win_rate=self.signal_engine.strategy_metrics['win_rate'],
-                avg_win_loss_ratio=self.signal_engine.strategy_metrics['avg_w_l_ratio'],
+                win_rate=win_rate,
+                avg_win_loss_ratio=avg_wl,
                 max_risk=self.config.max_risk_per_trade,
                 account_size=self.config.account_size,
                 margin_per_lot=self.config.margin_per_lot,

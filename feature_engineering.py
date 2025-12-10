@@ -9,6 +9,7 @@ This module implements the advanced feature set outlined in claud.md, including:
 """
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -44,6 +45,13 @@ REQUIRED_FEATURE_COLUMNS = [
     'ce_volume_to_oi_ratio', 'pe_volume_to_oi_ratio',
     'ce_oi_spike', 'pe_oi_spike',
     'avg_ce_iv', 'avg_pe_iv', 'atm_iv', 'otm_pe_avg_iv',
+    # IV Change Features (for RL - sudden IV inclines on strikes)
+    'atm_iv_change_3m', 'atm_iv_change_5m', 'atm_iv_change_15m',
+    'atm_iv_spike', 'iv_incline_intensity', 'iv_momentum',
+    'itm_ce_iv_change_3m', 'itm_pe_iv_change_3m',
+    'iv_spike_strikes_count', 'iv_incline_direction',
+    # Max IV % away from ATM (captures IV skew in wings)
+    'max_iv_pct_away_from_atm', 'max_iv_strike_distance',
     'bid_ask_spread', 'order_book_imbalance',
     'ce_pct_change_3m', 'pe_pct_change_3m',
     'ce_oi_momentum_5', 'ce_oi_momentum_10', 'ce_oi_momentum_20',
@@ -246,6 +254,19 @@ def engineer_live_feature_set(
         'atm_iv': option_aggs.atm_iv,
         'otm_pe_avg_iv': option_aggs.otm_pe_avg_iv,
     }
+    
+    # IV Change Features (for RL - sudden IV inclines on strikes)
+    # These features capture IV momentum and spikes that drive market direction
+    iv_change_features = _calculate_iv_change_features(
+        handler, call_options, put_options, atm_strike, spot_price
+    )
+    features.update(iv_change_features)
+    
+    # Max IV % away from ATM (captures IV skew in wings)
+    max_iv_features = _calculate_max_iv_away_from_atm(
+        call_options, put_options, option_aggs.atm_iv
+    )
+    features.update(max_iv_features)
 
     # Enhanced features
     features['order_flow_toxicity'] = vpin_feature
@@ -910,6 +931,268 @@ def _safe_mean(values: Iterable[float]) -> float:
 
 def _safe_ratio(numerator: float, denominator: float) -> float:
     return numerator / denominator if denominator else 0.0
+
+
+def _calculate_iv_change_features(
+    handler,
+    call_options: List[Dict],
+    put_options: List[Dict],
+    atm_strike: float,
+    spot_price: float
+) -> Dict[str, float]:
+    """
+    Calculate IV change features that capture sudden IV inclines on strike prices.
+    
+    These features are critical for RL model to detect IV-driven market direction changes.
+    
+    Returns:
+        Dictionary of IV change features
+    """
+    features = {
+        'atm_iv_change_3m': 0.0,
+        'atm_iv_change_5m': 0.0,
+        'atm_iv_change_15m': 0.0,
+        'atm_iv_spike': 0.0,
+        'iv_incline_intensity': 0.0,
+        'iv_momentum': 0.0,
+        'itm_ce_iv_change_3m': 0.0,
+        'itm_pe_iv_change_3m': 0.0,
+        'iv_spike_strikes_count': 0.0,
+        'iv_incline_direction': 0.0,
+    }
+    
+    try:
+        # Get current IV values from handler cache
+        iv_cache = getattr(handler, 'option_iv_cache', {})
+        if not iv_cache:
+            return features
+        
+        # Find ATM options (closest to ATM strike)
+        atm_call_iv = None
+        atm_put_iv = None
+        atm_call_token = None
+        atm_put_token = None
+        
+        min_call_dist = float('inf')
+        min_put_dist = float('inf')
+        
+        for opt in call_options:
+            strike = opt.get('strike', 0)
+            if strike == 0:
+                continue
+            dist = abs(strike - atm_strike)
+            if dist < min_call_dist:
+                min_call_dist = dist
+                token = opt.get('instrument_token')
+                if token and token in iv_cache:
+                    atm_call_iv = iv_cache[token]
+                    atm_call_token = token
+        
+        for opt in put_options:
+            strike = opt.get('strike', 0)
+            if strike == 0:
+                continue
+            dist = abs(strike - atm_strike)
+            if dist < min_put_dist:
+                min_put_dist = dist
+                token = opt.get('instrument_token')
+                if token and token in iv_cache:
+                    atm_put_iv = iv_cache[token]
+                    atm_put_token = token
+        
+        # Use average of call and put ATM IV, or whichever is available
+        current_atm_iv = None
+        if atm_call_iv is not None and atm_put_iv is not None:
+            current_atm_iv = (atm_call_iv + atm_put_iv) / 2.0
+        elif atm_call_iv is not None:
+            current_atm_iv = atm_call_iv
+        elif atm_put_iv is not None:
+            current_atm_iv = atm_put_iv
+        
+        if current_atm_iv is None:
+            return features
+        
+        # Initialize IV history tracking if not exists
+        if not hasattr(handler, '_iv_history_window'):
+            handler._iv_history_window = {}
+        
+        # Store current IV in history
+        for token in [atm_call_token, atm_put_token]:
+            if token and token in iv_cache:
+                if token not in handler._iv_history_window:
+                    handler._iv_history_window[token] = deque(maxlen=20)  # Keep last 20 minutes
+                handler._iv_history_window[token].append({
+                    'iv': iv_cache[token],
+                    'timestamp': now_ist()
+                })
+        
+        # Calculate IV changes for ATM
+        if atm_call_token and atm_call_token in handler._iv_history_window:
+            iv_window = handler._iv_history_window[atm_call_token]
+            if len(iv_window) >= 3:
+                current_iv = iv_window[-1]['iv']
+                iv_3m = iv_window[-3]['iv'] if len(iv_window) >= 3 else current_iv
+                iv_5m = iv_window[-5]['iv'] if len(iv_window) >= 5 else current_iv
+                iv_15m = iv_window[-15]['iv'] if len(iv_window) >= 15 else current_iv
+                
+                if iv_3m > 0:
+                    features['atm_iv_change_3m'] = ((current_iv - iv_3m) / iv_3m) * 100.0
+                if iv_5m > 0:
+                    features['atm_iv_change_5m'] = ((current_iv - iv_5m) / iv_5m) * 100.0
+                if iv_15m > 0:
+                    features['atm_iv_change_15m'] = ((current_iv - iv_15m) / iv_15m) * 100.0
+                
+                # IV Spike: sudden large increase (>5% in 3 minutes)
+                if features['atm_iv_change_3m'] > 5.0:
+                    features['atm_iv_spike'] = features['atm_iv_change_3m']
+                
+                # IV Momentum: rate of change
+                if len(iv_window) >= 2:
+                    iv_momentum_raw = (iv_window[-1]['iv'] - iv_window[-2]['iv']) / max(iv_window[-2]['iv'], 0.01)
+                    features['iv_momentum'] = iv_momentum_raw * 100.0
+        
+        # Calculate IV incline intensity (weighted by OI)
+        # Higher OI strikes with IV increases are more significant
+        iv_incline_sum = 0.0
+        iv_spike_count = 0
+        total_weight = 0.0
+        
+        for opt in call_options + put_options:
+            token = opt.get('instrument_token')
+            if not token or token not in iv_cache:
+                continue
+            
+            current_iv = iv_cache[token]
+            oi = float(opt.get('latest_oi', 0) or 0)
+            strike = opt.get('strike', 0)
+            
+            # Weight by OI and proximity to ATM
+            dist_from_atm = abs(strike - atm_strike) if atm_strike > 0 else 0
+            proximity_weight = 1.0 / (1.0 + dist_from_atm / 50.0)  # Decay with distance
+            weight = oi * proximity_weight
+            
+            # Check for IV increase in history
+            if token in handler._iv_history_window:
+                iv_window = handler._iv_history_window[token]
+                if len(iv_window) >= 3:
+                    iv_3m_ago = iv_window[-3]['iv']
+                    if iv_3m_ago > 0:
+                        iv_change_pct = ((current_iv - iv_3m_ago) / iv_3m_ago) * 100.0
+                        if iv_change_pct > 0:  # Only count increases
+                            iv_incline_sum += iv_change_pct * weight
+                            total_weight += weight
+                            
+                            # Count spikes (>5% increase)
+                            if iv_change_pct > 5.0:
+                                iv_spike_count += 1
+        
+        if total_weight > 0:
+            features['iv_incline_intensity'] = iv_incline_sum / total_weight
+        features['iv_spike_strikes_count'] = float(iv_spike_count)
+        
+        # IV Incline Direction: positive = bullish (CE IV up), negative = bearish (PE IV up)
+        itm_ce_iv_change = 0.0
+        itm_pe_iv_change = 0.0
+        itm_ce_count = 0
+        itm_pe_count = 0
+        
+        for opt in call_options:
+            if _is_itm(opt, 'ce'):
+                token = opt.get('instrument_token')
+                if token and token in handler._iv_history_window:
+                    iv_window = handler._iv_history_window[token]
+                    if len(iv_window) >= 3:
+                        iv_change = ((iv_window[-1]['iv'] - iv_window[-3]['iv']) / max(iv_window[-3]['iv'], 0.01)) * 100.0
+                        itm_ce_iv_change += iv_change
+                        itm_ce_count += 1
+        
+        for opt in put_options:
+            if _is_itm(opt, 'pe'):
+                token = opt.get('instrument_token')
+                if token and token in handler._iv_history_window:
+                    iv_window = handler._iv_history_window[token]
+                    if len(iv_window) >= 3:
+                        iv_change = ((iv_window[-1]['iv'] - iv_window[-3]['iv']) / max(iv_window[-3]['iv'], 0.01)) * 100.0
+                        itm_pe_iv_change += iv_change
+                        itm_pe_count += 1
+        
+        if itm_ce_count > 0:
+            features['itm_ce_iv_change_3m'] = itm_ce_iv_change / itm_ce_count
+        if itm_pe_count > 0:
+            features['itm_pe_iv_change_3m'] = itm_pe_iv_change / itm_pe_count
+        
+        # Direction: positive = CE IV rising (bearish), negative = PE IV rising (bullish)
+        features['iv_incline_direction'] = features['itm_ce_iv_change_3m'] - features['itm_pe_iv_change_3m']
+        
+    except Exception as e:
+        import logging
+        logging.debug(f"Error calculating IV change features: {e}")
+    
+    return features
+
+
+def _calculate_max_iv_away_from_atm(
+    call_options: List[Dict],
+    put_options: List[Dict],
+    atm_iv: float
+) -> Dict[str, float]:
+    """
+    Calculate the maximum IV percentage away from ATM strike prices.
+    
+    This feature captures IV skew in the wings (far OTM strikes) which can indicate:
+    - Fear/greed in the market (high OTM put IV = fear)
+    - Potential volatility expansion
+    - Market direction bias
+    
+    Args:
+        call_options: List of call option dictionaries
+        put_options: List of put option dictionaries
+        atm_iv: ATM implied volatility value
+    
+    Returns:
+        Dictionary with:
+        - max_iv_pct_away_from_atm: Percentage difference between max IV (away from ATM) and ATM IV
+        - max_iv_strike_distance: Number of strikes away where max IV occurs
+    """
+    features = {
+        'max_iv_pct_away_from_atm': 0.0,
+        'max_iv_strike_distance': 0.0,
+    }
+    
+    if not atm_iv or atm_iv <= 0:
+        return features
+    
+    try:
+        max_iv = 0.0
+        max_iv_distance = 0.0
+        
+        # Consider strikes that are at least 2 strikes away from ATM
+        # This focuses on "wings" where IV skew is most pronounced
+        min_distance = 2
+        
+        # Check all call and put options
+        for opt in call_options + put_options:
+            position = abs(opt.get('position', 0))
+            iv = opt.get('iv')
+            
+            # Only consider strikes away from ATM (at least min_distance away)
+            if position >= min_distance and iv is not None:
+                iv_value = float(iv)
+                if iv_value > max_iv:
+                    max_iv = iv_value
+                    max_iv_distance = position
+        
+        # Calculate percentage difference from ATM IV
+        if max_iv > 0:
+            pct_diff = ((max_iv - atm_iv) / atm_iv) * 100.0
+            features['max_iv_pct_away_from_atm'] = pct_diff
+            features['max_iv_strike_distance'] = max_iv_distance
+        
+    except Exception as e:
+        import logging
+        logging.debug(f"Error calculating max IV away from ATM: {e}")
+    
+    return features
 
 
 def _safe_div(numerator: float, denominator: float, fallback: float = 0.0, min_denominator: float = 1.0) -> float:

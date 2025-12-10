@@ -64,7 +64,8 @@ from jobs import FeatureJob, ResultJob
 from app_manager import AppManager
 from connector import Connector, initialize_kite_session, fetch_all_instruments, configure_exchange_handlers, bootstrap_initial_prices
 from execution.auto_executor import AutoExecutor, ExecutionConfig
-from execution.strategy_router import StrategySignal
+from execution.strategy_router import StrategySignal, AdvancedStrategyRouter
+from models.reinforcement_learning import RLState
 from data_ingestion.vix_term_structure import record_vix_term_structure, calculate_vix_historical_metrics, get_realized_volatility
 from dashboard.server import run_dashboard_server
 from config import get_config
@@ -633,6 +634,8 @@ class FeatureWorker(MpProcess):
         self.shutdown_event = shutdown_event
         # ML predictors are lazy-loaded per exchange in this worker process
         self._ml_predictors: Dict[str, Optional[MLSignalGenerator]] = {}
+        # Strategy routers (with RL support) are lazy-loaded per exchange
+        self._strategy_routers: Dict[str, Optional[AdvancedStrategyRouter]] = {}
 
     def _get_ml_predictor(self, exchange: str) -> Optional[MLSignalGenerator]:
         """Lazy-load ML predictor for exchange in this worker process."""
@@ -649,6 +652,23 @@ class FeatureWorker(MpProcess):
                 logging.error(f"[Worker-{exchange}] ML initialization failed: {e}", exc_info=True)
                 self._ml_predictors[exchange] = None
         return self._ml_predictors[exchange]
+
+    def _get_strategy_router(self, exchange: str) -> Optional[AdvancedStrategyRouter]:
+        """Lazy-load strategy router (with RL support) for exchange in this worker process."""
+        if exchange not in self._strategy_routers:
+            try:
+                logging.info(f"[Worker-{exchange}] Initializing strategy router (with RL support)...")
+                self._strategy_routers[exchange] = AdvancedStrategyRouter(exchange)
+                # Check if RL is loaded
+                if self._strategy_routers[exchange].rl_strategy and self._strategy_routers[exchange].rl_strategy.model_loaded:
+                    algorithm_info = 'ENSEMBLE' if self._strategy_routers[exchange].rl_strategy.use_ensemble else self._strategy_routers[exchange].rl_strategy.algorithm
+                    logging.info(f"[Worker-{exchange}] Strategy router initialized with RL ({algorithm_info})")
+                else:
+                    logging.info(f"[Worker-{exchange}] Strategy router initialized (RL not available)")
+            except Exception as e:
+                logging.error(f"[Worker-{exchange}] Strategy router initialization failed: {e}", exc_info=True)
+                self._strategy_routers[exchange] = None
+        return self._strategy_routers[exchange]
 
     def run(self):
         """Worker process main loop."""
@@ -775,7 +795,93 @@ class FeatureWorker(MpProcess):
             ml_rationale = 'ML Not Available'
             ml_metadata: Dict[str, Any] = {}
 
-            if ml_predictor and ml_predictor.models_loaded and ml_features_dict:
+            # Try using AdvancedStrategyRouter (with RL support) first, fallback to MLSignalGenerator
+            strategy_router = self._get_strategy_router(exchange)
+            
+            if strategy_router and ml_features_dict:
+                try:
+                    # Create RLState for RL model (if available)
+                    rl_state = None
+                    if strategy_router.rl_strategy and strategy_router.rl_strategy.model_loaded:
+                        try:
+                            # Convert features dict to numpy array for RL
+                            from feature_engineering import REQUIRED_FEATURE_COLUMNS
+                            feature_array = np.array([
+                                ml_features_dict.get(col, 0.0) for col in REQUIRED_FEATURE_COLUMNS
+                            ], dtype=np.float32)
+                            
+                            # Create RLState (using placeholder values for position/portfolio)
+                            rl_state = RLState(
+                                features=feature_array,
+                                current_position=0.0,  # TODO: Track actual position
+                                portfolio_value=1_000_000.0,  # TODO: Track actual portfolio value
+                                timestamp=now.isoformat()
+                            )
+                        except Exception as rl_e:
+                            logging.debug(f"[{exchange}] RLState creation failed: {rl_e}")
+                            rl_state = None
+                    
+                    # Generate signal using router (supports RL, DL, LightGBM)
+                    router_signal = strategy_router.generate_signal(
+                        features_dict=ml_features_dict,
+                        state=rl_state
+                    )
+                    
+                    ml_signal = router_signal.signal
+                    ml_confidence = router_signal.confidence
+                    ml_rationale = router_signal.rationale
+                    ml_metadata = router_signal.metadata or {}
+                    
+                    # Add source information
+                    ml_metadata['source'] = router_signal.source
+                    
+                    collector = get_metrics_collector(exchange)
+                    try:
+                        collector.record_model_performance(
+                            signal=ml_signal,
+                            confidence=ml_confidence,
+                            source=ml_metadata.get('source', 'lightgbm'),
+                            metadata=ml_metadata
+                        )
+                    except Exception as me:
+                        logging.debug(f"[{exchange}] Metrics recording failed: {me}")
+
+                    # Log high-level recommendation for audit and research
+                    if ml_signal != 'HOLD':
+                        try:
+                            log_recommendation(
+                                exchange=exchange,
+                                signal=ml_signal,
+                                confidence=ml_confidence,
+                                metadata=ml_metadata or {},
+                            )
+                        except Exception as re:
+                            logging.debug(f"[{exchange}] Recommendation logging failed: {re}")
+                except Exception as e:
+                    logging.error(f"[{exchange}] Strategy router inference failed: {e}", exc_info=True)
+                    # Fallback to MLSignalGenerator
+                    if ml_predictor and ml_predictor.models_loaded:
+                        try:
+                            signal, confidence, rationale, metadata = ml_predictor.generate_signal(
+                                ml_features_dict
+                            )
+                            ml_signal = signal
+                            ml_confidence = confidence
+                            ml_rationale = rationale
+                            ml_metadata = metadata
+                        except Exception as fallback_e:
+                            logging.error(f"[{exchange}] Fallback ML inference failed: {fallback_e}", exc_info=True)
+                            ml_signal = 'HOLD'
+                            ml_confidence = 0.0
+                            ml_rationale = f'ML Error: {str(fallback_e)}'
+                            ml_metadata = {}
+                    else:
+                        ml_signal = 'HOLD'
+                        ml_confidence = 0.0
+                        ml_rationale = f'Router Error: {str(e)}'
+                        ml_metadata = {}
+            elif ml_predictor and ml_predictor.models_loaded and ml_features_dict:
+                # Fallback to MLSignalGenerator if router not available
                 try:
                     signal, confidence, rationale, metadata = ml_predictor.generate_signal(
                         ml_features_dict
