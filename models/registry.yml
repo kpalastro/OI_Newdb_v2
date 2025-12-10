@@ -1,0 +1,10 @@
+NSE:
+  current:
+    version: default
+    model_dir: models/NSE
+BSE:
+  current:
+    version: default
+    model_dir: models/BSE
+
+

@@ -1,0 +1,41 @@
+{
+  "exchange": "NSE",
+  "last_updated": "2025-11-28T15:49:31.041954+05:30",
+  "period_hours": 24,
+  "data_quality": {
+    "macro_availability_pct": 0.0,
+    "depth_capture_success_rate": 0.0,
+    "feature_engineering_errors": 0,
+    "database_write_success_rate": 0.0
+  },
+  "model_performance": {
+    "total_signals": 0,
+    "buy_signals": 0,
+    "sell_signals": 0,
+    "hold_signals": 0,
+    "avg_confidence": 0.0,
+    "confidence_distribution": {
+      "high": 0,
+      "medium": 0,
+      "low": 0
+    },
+    "signal_frequency_per_hour": 0.0
+  },
+  "system_health": {
+    "memory_usage_mb": 0.0,
+    "cpu_usage_pct": 0.0,
+    "database_size_mb": 0.0,
+    "error_rate": 0.0,
+    "uptime_hours": 0.0
+  },
+  "paper_trading": {
+    "total_executions": 0,
+    "successful_executions": 0,
+    "rejected_executions": 0,
+    "rejection_reasons": {},
+    "total_pnl": 0.0,
+    "win_rate": 0.0,
+    "avg_trade_pnl": 0.0,
+    "portfolio_constraint_violations": 0
+  }
+}

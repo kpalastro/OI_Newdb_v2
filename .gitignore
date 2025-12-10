@@ -1,0 +1,52 @@
+# Environment variables (contains sensitive credentials)
+.env
+
+# Database files
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Log files
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+ENV/
+logs/
+build/
+dist/
+metrics/phase_1/
+metrics/phase_2/
+metrics/phase_3/
+metrics/phase_4/
+metrics/phase_5/
+metrics/phase_6/
+metrics/phase_7/
+metrics/phase_8/
+metrics/phase_9/
+metrics/phase_10/
+
+models/NSE/
+models/BSE/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+

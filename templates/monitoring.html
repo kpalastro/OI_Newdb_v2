@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ strings.monitoring_title }}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            background: #0f0f23;
+            color: #f7fafc;
+            min-height: 100vh;
+        }
+        .card {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            backdrop-filter: blur(8px);
+        }
+        .metric-label {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            color: #cbd5f5;
+            margin-bottom: 0.25rem;
+        }
+        .metric-value {
+            font-size: 1.3rem;
+            font-weight: 600;
+            color: #f7fafc;
+            min-height: 1.5rem;
+            word-break: break-word;
+        }
+        .card-title {
+            color: #f7fafc;
+        }
+        .text-muted {
+            color: #a0aec0 !important;
+        }
+        .heatmap-row {
+            display: flex;
+            align-items: center;
+            margin-bottom: 0.5rem;
+        }
+        .heatmap-row span {
+            display: inline-block;
+            width: 14px;
+            height: 14px;
+            margin-right: 4px;
+            border-radius: 2px;
+            background: #2d3748;
+        }
+        .heatmap-label {
+            width: 60px;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            color: #a0aec0;
+        }
+        .table-dark {
+            --bs-table-bg: rgba(255, 255, 255, 0.04);
+            --bs-table-striped-bg: rgba(255, 255, 255, 0.07);
+            color: #f7fafc;
+        }
+    </style>
+</head>
+<body>
+    <div class="container py-4">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <div>
+                <h1 class="h3 mb-1">{{ strings.monitoring_title }}</h1>
+                <p class="text-muted mb-0">{{ strings.monitoring_subtitle }}</p>
+            </div>
+            <div class="d-flex gap-2">
+                <a class="btn btn-outline-light" href="/" role="button">&larr; Back to Tracker</a>
+            </div>
+        </div>
+
+        <div id="healthCards" class="row g-4"></div>
+
+        <div class="row g-4 mt-1">
+            <div class="col-lg-6">
+                <div class="card h-100">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <h5 class="card-title mb-0">{{ strings.monitoring_drawdown_label }}</h5>
+                        </div>
+                        <canvas id="equityChart" height="150"></canvas>
+                    </div>
+                </div>
+            </div>
+            <div class="col-lg-6">
+                <div class="card h-100">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <h5 class="card-title mb-0">{{ strings.monitoring_accuracy_label }}</h5>
+                        </div>
+                        <div id="accuracyHeatmap"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card mt-4">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h5 class="card-title mb-0">{{ strings.monitoring_card_cv }}</h5>
+                    <small class="text-muted" id="cvUpdated"></small>
+                </div>
+                <canvas id="cvChart" height="120"></canvas>
+            </div>
+        </div>
+
+        <div class="card mt-4">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h5 class="card-title mb-0">{{ strings.monitoring_walkforward_label }}</h5>
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-dark table-striped align-middle">
+                        <thead>
+                            <tr>
+                                <th>Exchange</th>
+                                <th>Family</th>
+                                <th>Segment</th>
+                                <th>Accuracy</th>
+                                <th>Macro F1</th>
+                                <th>Optuna Score</th>
+                            </tr>
+                        </thead>
+                        <tbody id="walkForwardTable"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+        async function loadHealth() {
+            try {
+                const res = await fetch('/monitoring/api/model-health');
+                if (!res.ok) {
+                    throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+                }
+                const data = await res.json();
+                if (!data || Object.keys(data).length === 0) {
+                    document.getElementById('healthCards').innerHTML = 
+                        '<div class="col-12"><div class="card"><div class="card-body"><p class="text-muted mb-0">No data available. Run training to generate reports.</p></div></div></div>';
+                    return;
+                }
+                renderHealthCards(data);
+                renderCvChart(data);
+                renderEquityChart(data);
+                renderAccuracyHeatmap(data);
+                renderWalkForwardTable(data);
+            } catch (error) {
+                console.error('Failed to load health data:', error);
+                document.getElementById('healthCards').innerHTML = 
+                    '<div class="col-12"><div class="card"><div class="card-body"><p class="text-danger mb-0">Error loading data: ' + error.message + '</p></div></div></div>';
+            }
+        }
+
+        function renderHealthCards(data) {
+            const container = document.getElementById('healthCards');
+            const entries = Object.entries(data);
+            if (!entries.length) {
+                container.innerHTML = '<div class="col-12"><div class="card"><div class="card-body"><p class="text-muted mb-0">No diagnostics found. Run training to generate reports.</p></div></div></div>';
+                return;
+            }
+
+            container.innerHTML = entries.map(([exchange, report]) => {
+                const training = report.training || {};
+                const auto = report.auto_ml || {};
+                const cv = training.cv_results || [];
+                // Try multiple possible keys for target distribution
+                const targetDist = training.target_stats || training.target_distribution || 
+                                 (cv.length > 0 && cv[0].target_distribution ? 
+                                  cv[0].target_distribution : {}) || {};
+                // Try multiple possible keys for optuna params
+                const optuna = training.optuna_params || training.best_params || 
+                              (auto.best_by_family && Object.keys(auto.best_by_family).length > 0 ? 
+                               (Object.values(auto.best_by_family)[0] && Object.values(auto.best_by_family)[0].params ? 
+                                Object.values(auto.best_by_family)[0].params : {}) : {}) || {};
+                const backtest = report.backtest || {};
+                const online = report.online_learning || {};
+                const bestFamily = summarizeBestFamily(auto.best_by_family);
+                const netPnL = backtest.metrics ? (backtest.metrics.net_total_pnl || backtest.metrics.total_pnl || 0) : 0;
+                const sharpe = backtest.metrics ? (backtest.metrics.sharpe_ratio || backtest.metrics.sharpe || 0) : 0;
+                const rollingAcc = online.rolling_accuracy !== undefined ? 
+                                 (typeof online.rolling_accuracy === 'number' ? (online.rolling_accuracy * 100).toFixed(1) : online.rolling_accuracy) : 
+                                 (online.accuracy !== undefined ? 
+                                  (typeof online.accuracy === 'number' ? (online.accuracy * 100).toFixed(1) : online.accuracy) : '—');
+
+                return `
+                    <div class="col-12 col-lg-6">
+                        <div class="card h-100">
+                            <div class="card-body">
+                                <div class="d-flex justify-content-between align-items-center mb-3">
+                                    <h5 class="card-title mb-0">${exchange}</h5>
+                                    <small class="text-muted">{{ strings.monitoring_updated_label }}: ${cv.length ? cv.length + ' folds' : 'No CV data'}</small>
+                                </div>
+                                <div class="row g-3">
+                                    <div class="col-6">
+                                        <div class="metric-label">{{ strings.monitoring_card_target }}</div>
+                                        <div class="metric-value" style="color: #f7fafc;">${formatDistribution(targetDist)}</div>
+                                    </div>
+                                    <div class="col-6">
+                                        <div class="metric-label">{{ strings.monitoring_card_optuna }}</div>
+                                        <div class="metric-value" style="color: #f7fafc; font-size: 0.9rem;">${Object.keys(optuna).length ? formatOptuna(optuna) : '—'}</div>
+                                    </div>
+                                    <div class="col-6">
+                                        <div class="metric-label">{{ strings.monitoring_card_auto_ml }}</div>
+                                        <div class="metric-value" style="color: #60a5fa;">${bestFamily}</div>
+                                    </div>
+                                    <div class="col-6">
+                                        <div class="metric-label">{{ strings.monitoring_card_backtest }}</div>
+                                        <div class="metric-value" style="color: #f7fafc;">PnL ₹${netPnL.toFixed(0)} · Sharpe ${sharpe.toFixed(2)}</div>
+                                    </div>
+                                    <div class="col-6">
+                                        <div class="metric-label">{{ strings.monitoring_card_online }}</div>
+                                        <div class="metric-value" style="color: #f7fafc;">${rollingAcc === '—' ? '—' : rollingAcc + '%'}</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function renderCvChart(data) {
+            const labels = [];
+            const datasets = [];
+            Object.entries(data).forEach(([exchange, report]) => {
+                const training = report.training || {};
+                const cv = training.cv_results || [];
+                if (!cv.length) return;
+                const exchangeLabels = cv.map(fold => `F${fold.fold}`);
+                if (labels.length < exchangeLabels.length) {
+                    labels.length = 0;
+                    labels.push(...exchangeLabels);
+                }
+                datasets.push({
+                    label: `${exchange} Accuracy`,
+                    data: cv.map(fold => (fold.accuracy || 0) * 100),
+                    borderWidth: 2,
+                    fill: false
+                });
+                const cvUpdated = document.getElementById('cvUpdated');
+                if (cvUpdated) {
+                    cvUpdated.textContent = `${exchange} folds: ${cv.length}`;
+                }
+            });
+
+            if (!datasets.length) {
+                const ctx = document.getElementById('cvChart').getContext('2d');
+                ctx.font = '14px sans-serif';
+                ctx.fillStyle = '#a0aec0';
+                ctx.fillText('No CV data available', 20, 40);
+                return;
+            }
+
+            new Chart(document.getElementById('cvChart'), {
+                type: 'line',
+                data: { labels, datasets },
+                options: {
+                    responsive: true,
+                    scales: {
+                        y: {
+                            ticks: { color: '#cbd5f5', callback: value => value + '%' },
+                            beginAtZero: true,
+                            max: 100
+                        },
+                        x: { ticks: { color: '#cbd5f5' } }
+                    },
+                    plugins: {
+                        legend: { labels: { color: '#f7fafc' } }
+                    }
+                }
+            });
+        }
+
+        function renderEquityChart(data) {
+            const ctx = document.getElementById('equityChart').getContext('2d');
+            const datasets = [];
+            let labels = [];
+            Object.entries(data).forEach(([exchange, report]) => {
+                const equity = (report.backtest && report.backtest.equity_curve) || [];
+                if (!equity.length) return;
+                const exchangeLabels = equity.map(point => point.timestamp);
+                if (!labels.length || exchangeLabels.length > labels.length) {
+                    labels = exchangeLabels;
+                }
+                datasets.push({
+                    label: `${exchange} Net Equity`,
+                    data: equity.map(point => point.net_equity),
+                    borderWidth: 2,
+                    fill: false,
+                });
+                datasets.push({
+                    label: `${exchange} Gross Equity`,
+                    data: equity.map(point => point.gross_equity),
+                    borderDash: [4, 2],
+                    borderWidth: 1,
+                    fill: false,
+                });
+            });
+            if (!datasets.length) {
+                ctx.font = '14px sans-serif';
+                ctx.fillStyle = '#a0aec0';
+                ctx.fillText('Run a backtest via backtesting/run.py to populate equity curves.', 20, 40);
+                return;
+            }
+            new Chart(ctx, {
+                type: 'line',
+                data: { labels, datasets },
+                options: {
+                    responsive: true,
+                    interaction: { mode: 'index', intersect: false },
+                    scales: {
+                        y: {
+                            ticks: { color: '#cbd5f5', callback: value => '₹' + value },
+                            beginAtZero: true,
+                        },
+                        x: { ticks: { color: '#cbd5f5' } }
+                    },
+                    plugins: { legend: { labels: { color: '#f7fafc' } } }
+                }
+            });
+        }
+
+        function renderAccuracyHeatmap(data) {
+            const container = document.getElementById('accuracyHeatmap');
+            const rows = Object.entries(data).map(([exchange, report]) => {
+                const history = (report.online_learning && report.online_learning.accuracy_history) || [];
+                if (!history.length) {
+                    return `
+                        <div class="heatmap-row">
+                            <div class="heatmap-label">${exchange}</div>
+                            <span style="width:auto;color:#a0aec0">No feedback yet</span>
+                        </div>`;
+                }
+                const boxes = history.map(value => {
+                    const pct = (value * 100).toFixed(1);
+                    return `<span style="background:${accuracyColor(value)}" title="${pct}%"></span>`;
+                }).join('');
+                return `
+                    <div class="heatmap-row">
+                        <div class="heatmap-label">${exchange}</div>
+                        <div>${boxes}</div>
+                    </div>`;
+            }).join('');
+            container.innerHTML = rows;
+        }
+
+        function renderWalkForwardTable(data) {
+            const body = document.getElementById('walkForwardTable');
+            const rows = [];
+            Object.entries(data).forEach(([exchange, report]) => {
+                const autoMl = report.auto_ml || {};
+                const bestFamilies = autoMl.best_by_family || {};
+                const segments = autoMl.segments || [];
+                
+                // If we have best_by_family, use that
+                if (Object.keys(bestFamilies).length > 0) {
+                    Object.entries(bestFamilies).forEach(([family, entry]) => {
+                        const metrics = entry.metrics || {};
+                        rows.push(`
+                            <tr>
+                                <td style="color: #f7fafc;">${exchange}</td>
+                                <td style="color: #f7fafc;">${family}</td>
+                                <td style="color: #f7fafc;">${entry.segment_id || '—'}</td>
+                                <td style="color: #f7fafc;">${formatPercent(metrics.accuracy)}</td>
+                                <td style="color: #f7fafc;">${formatPercent(metrics.f1_macro)}</td>
+                                <td style="color: #f7fafc;">${entry.optuna_score !== undefined && entry.optuna_score !== null ? 
+                                    (typeof entry.optuna_score === 'number' ? entry.optuna_score.toFixed(3) : entry.optuna_score) : '—'}</td>
+                            </tr>
+                        `);
+                    });
+                } 
+                // Otherwise, try to use segments data
+                else if (segments.length > 0) {
+                    segments.forEach(segment => {
+                        const metrics = segment.metrics || {};
+                        rows.push(`
+                            <tr>
+                                <td style="color: #f7fafc;">${exchange}</td>
+                                <td style="color: #f7fafc;">${segment.family || '—'}</td>
+                                <td style="color: #f7fafc;">${segment.segment_id || '—'}</td>
+                                <td style="color: #f7fafc;">${formatPercent(metrics.accuracy)}</td>
+                                <td style="color: #f7fafc;">${formatPercent(metrics.f1_macro)}</td>
+                                <td style="color: #f7fafc;">${segment.optuna_score !== undefined && segment.optuna_score !== null ? 
+                                    (typeof segment.optuna_score === 'number' ? segment.optuna_score.toFixed(3) : segment.optuna_score) : '—'}</td>
+                            </tr>
+                        `);
+                    });
+                }
+            });
+            body.innerHTML = rows.length ? rows.join('') : `
+                <tr>
+                    <td colspan="6" class="text-muted" style="color: #a0aec0 !important;">Run train_orchestrator.py to populate walk-forward results.</td>
+                </tr>`;
+        }
+
+        function formatDistribution(dist) {
+            if (!dist || !Object.keys(dist).length) return '—';
+            const entries = Object.entries(dist);
+            if (entries.length === 0) return '—';
+            // Format as: -1: 30.5%, 0: 40.2%, 1: 29.3%
+            return entries
+                .map(([key, val]) => {
+                    const numVal = typeof val === 'number' ? val : parseFloat(val) || 0;
+                    return `${key}: ${(numVal * 100).toFixed(1)}%`;
+                })
+                .join(' · ');
+        }
+
+        function formatOptuna(params) {
+            if (!params || !Object.keys(params).length) return '—';
+            const entries = Object.entries(params);
+            if (entries.length === 0) return '—';
+            // Limit to first 3 params to avoid overflow, show key=value format
+            const limited = entries.slice(0, 3);
+            return limited
+                .map(([k, v]) => {
+                    if (typeof v === 'number') {
+                        // Format numbers more compactly
+                        if (v < 1) return `${k}=${v.toFixed(3)}`;
+                        if (v < 100) return `${k}=${v.toFixed(1)}`;
+                        return `${k}=${Math.round(v)}`;
+                    }
+                    return `${k}=${String(v).substring(0, 10)}`;
+                })
+                .join(', ') + (entries.length > 3 ? '...' : '');
+        }
+
+        function formatPercent(value) {
+            if (typeof value !== 'number' || isNaN(value)) return '—';
+            return (value * 100).toFixed(1) + '%';
+        }
+
+        function summarizeBestFamily(bestByFamily = {}) {
+            if (!bestByFamily || typeof bestByFamily !== 'object') return '—';
+            const entries = Object.entries(bestByFamily);
+            if (!entries.length) return '—';
+            const best = entries
+                .map(([family, meta]) => {
+                    const f1 = (meta && meta.metrics && meta.metrics.f1_macro) || 
+                              (meta && meta.f1_macro) || 0;
+                    return { family, f1: typeof f1 === 'number' ? f1 : parseFloat(f1) || 0 };
+                })
+                .sort((a, b) => b.f1 - a.f1)[0];
+            if (!best || best.f1 === 0) return '—';
+            return `${best.family} ${(best.f1 * 100).toFixed(1)}%`;
+        }
+
+        function accuracyColor(value) {
+            if (typeof value !== 'number' || isNaN(value)) return '#2d3748';
+            const hue = 10 + (value * 100) * 1.2; // approx green for higher accuracy
+            return `hsl(${Math.min(140, hue)}, 70%, 45%)`;
+        }
+
+        document.addEventListener('DOMContentLoaded', loadHealth);
+    </script>
+</body>
+</html>
+

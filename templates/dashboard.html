@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OI Gemini - Live Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; background-color: #1e1e1e; color: #e0e0e0; margin: 0; padding: 20px; }
+        .grid-container { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; }
+        .card { background: #2d2d2d; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+        .card-header { font-size: 1.2em; border-bottom: 1px solid #444; margin-bottom: 15px; padding-bottom: 10px; display: flex; justify-content: space-between; }
+        .metric-row { display: flex; justify-content: space-between; margin-bottom: 10px; }
+        .metric-label { color: #aaa; }
+        .metric-val { font-weight: bold; }
+        .positive { color: #4caf50; }
+        .negative { color: #f44336; }
+        #connection-status { position: fixed; top: 10px; right: 10px; padding: 5px 10px; border-radius: 4px; font-size: 0.8em; }
+        .connected { background-color: #4caf50; color: white; }
+        .disconnected { background-color: #f44336; color: white; }
+    </style>
+</head>
+<body>
+    <div id="connection-status" class="disconnected">Disconnected</div>
+    <h1>OI Gemini Dashboard <span style="font-size:0.5em; color:#888;">(Phase 2 Advanced)</span></h1>
+
+    <div class="grid-container">
+        <!-- NIFTY 50 Panel -->
+        <div class="card">
+            <div class="card-header">NIFTY 50 Live</div>
+            <div class="metric-row">
+                <span class="metric-label">Spot Price:</span>
+                <span class="metric-val" id="n50-spot">--</span>
+            </div>
+            <div class="metric-row">
+                <span class="metric-label">Future Price:</span>
+                <span class="metric-val" id="n50-future">--</span>
+            </div>
+            <div class="metric-row">
+                <span class="metric-label">ATM Strike:</span>
+                <span class="metric-val" id="n50-atm">--</span>
+            </div>
+            <!-- Charts could go here -->
+        </div>
+
+        <!-- Sentiment Panel -->
+        <div class="card">
+            <div class="card-header">Market Sentiment</div>
+            <div class="metric-row">
+                <span class="metric-label">NIFTY 50 A/D Ratio:</span>
+                <span class="metric-val" id="sent-ad50">--</span>
+            </div>
+            <div class="metric-row">
+                <span class="metric-label">Overall Score:</span>
+                <span class="metric-val" id="sent-score">--</span>
+            </div>
+            <div class="metric-row">
+                <span class="metric-label">FII/DII Net (Cr):</span>
+                <span class="metric-val" id="sent-flow">--</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const statusEl = document.getElementById('connection-status');
+        const wsUrl = `ws://${window.location.host}/ws/live`;
+        let socket;
+
+        function connect() {
+            socket = new WebSocket(wsUrl);
+
+            socket.onopen = () => {
+                statusEl.textContent = "Connected";
+                statusEl.className = "connected";
+            };
+
+            socket.onclose = () => {
+                statusEl.textContent = "Disconnected - Reconnecting...";
+                statusEl.className = "disconnected";
+                setTimeout(connect, 2000);
+            };
+
+            socket.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                updateDashboard(data);
+            };
+        }
+
+        function updateDashboard(data) {
+            // Update NIFTY 50
+            if (data.exchanges && data.exchanges.NSE) {
+                document.getElementById('n50-spot').textContent = data.exchanges.NSE.spot?.toFixed(2) || '--';
+                document.getElementById('n50-future').textContent = data.exchanges.NSE.future?.toFixed(2) || '--';
+                document.getElementById('n50-atm').textContent = data.exchanges.NSE.atm || '--';
+            }
+
+            // Update Sentiment
+            if (data.sentiment) {
+                const s = data.sentiment;
+                const ad50 = s.nifty50?.ad_ratio || 0;
+                const score = s.overall_sentiment_score || 0;
+                
+                const adEl = document.getElementById('sent-ad50');
+                adEl.textContent = ad50.toFixed(2);
+                adEl.className = "metric-val " + (ad50 > 1 ? "positive" : "negative");
+
+                document.getElementById('sent-score').textContent = score.toFixed(1);
+            }
+        }
+
+        connect();
+    </script>
+</body>
+</html>
+

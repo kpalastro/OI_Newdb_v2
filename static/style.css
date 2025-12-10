@@ -1,0 +1,59 @@
+body {
+    font-family: Arial, sans-serif;
+}
+
+.container {
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+}
+
+.left-panel, .right-panel {
+    width: 48%;
+    padding: 20px;
+}
+
+.left-panel {
+    background-color: #f8f8f8;
+    border-right: 1px solid #ccc;
+}
+
+.right-panel {
+    background-color: #fff;
+}
+
+h2 {
+    text-align: center;
+    color: #333;
+}
+
+#alerts {
+    margin-top: 20px;
+}
+
+.alert {
+    padding: 10px;
+    margin-bottom: 10px;
+    border-radius: 5px;
+    font-weight: bold;
+}
+
+.bullish {
+    color: green;
+}
+
+.bearish {
+    color: red;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 20px;
+}
+
+table th, table td {
+    padding: 10px;
+    border: 1px solid #ccc;
+    text-align: center;
+}

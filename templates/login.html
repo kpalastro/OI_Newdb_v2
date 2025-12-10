@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ strings.login_brand_name }} | {{ strings.login_submit_label }}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='login.css') }}">
+</head>
+<body>
+    <div class="login-gradient">
+        <div class="login-card">
+            <div class="brand">
+                <div class="logo-mark">OI</div>
+                <div>
+                    <h1>{{ strings.login_brand_name }}</h1>
+                    <p>{{ strings.login_brand_tagline }}</p>
+                </div>
+            </div>
+
+            <form method="post" class="login-form">
+                {% if error %}
+                    <div class="alert alert-error">{{ error }}</div>
+                {% endif %}
+
+                {% if initializing %}
+                    <div class="alert alert-info">{{ strings.login_initializing_notice }}</div>
+                {% endif %}
+
+                <label class="field-label" for="user_id">{{ strings.login_user_id_label }}</label>
+                <div class="input-wrapper">
+                    <input
+                        type="text"
+                        id="user_id"
+                        name="user_id"
+                        placeholder="{{ strings.login_user_id_placeholder }}"
+                        value="{{ request.form.get('user_id', '') }}"
+                        autocomplete="username"
+                        required>
+                </div>
+
+                <label class="field-label" for="password">{{ strings.login_password_label }}</label>
+                <div class="input-wrapper">
+                    <input
+                        type="password"
+                        id="password"
+                        name="password"
+                        placeholder="{{ strings.login_password_placeholder }}"
+                        autocomplete="current-password"
+                        required>
+                </div>
+
+                <div class="label-row">
+                    <label class="field-label" for="totp_code">{{ strings.login_totp_label }}</label>
+                    <span class="field-hint">{{ strings.login_totp_help }}</span>
+                </div>
+                <div class="input-wrapper">
+                    <input
+                        type="text"
+                        id="totp_code"
+                        name="totp_code"
+                        placeholder="{{ strings.login_totp_placeholder }}"
+                        maxlength="6"
+                        inputmode="numeric"
+                        pattern="[0-9]*"
+                        autocomplete="one-time-code"
+                        autofocus>
+                </div>
+
+                <button type="submit" class="primary-btn">
+                    <span>{{ strings.login_submit_label }}</span>
+                </button>
+            </form>
+
+            <p class="footer-text">{{ strings.login_footer_text }}</p>
+        </div>
+    </div>
+</body>
+</html>
+

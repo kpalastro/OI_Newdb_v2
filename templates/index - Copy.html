@@ -1,0 +1,679 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ML-Powered OI Tracker</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+    <style>
+        :root {
+            --primary-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            --success-gradient: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+            --danger-gradient: linear-gradient(135deg, #eb3349 0%, #f45c43 100%);
+            --dark-bg: #0f0f23;
+            --card-bg: rgba(255, 255, 255, 0.05);
+            --card-border: rgba(255, 255, 255, 0.1);
+            --text-primary: #ffffff;
+            --text-secondary: #a0aec0;
+            --itm-color: #48bb78;
+            --atm-color: #38b2ac;
+            --otm-color: #f56565;
+            --highlight-color: #fc8181;
+            --ml-buy-color: #2ddc73;
+            --ml-sell-color: #ff4d4d;
+            --ml-hold-color: #7d8da1;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: var(--dark-bg);
+            background-image: 
+                radial-gradient(at 40% 20%, hsla(240, 80%, 30%, 0.4) 0px, transparent 50%),
+                radial-gradient(at 80% 0%, hsla(280, 80%, 30%, 0.4) 0px, transparent 50%);
+            min-height: 100vh;
+            color: var(--text-primary);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            overflow: hidden;
+        }
+
+        .container-fluid {
+            padding: 0;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Main Header Container */
+        .top-header {
+            display: flex;
+            align-items: center;
+            background: var(--card-bg);
+            border-bottom: 2px solid var(--card-border);
+            padding: 0 15px 0 0;
+            min-height: 50px;
+        }
+
+        .nav-tabs {
+            border-bottom: none;
+            background: none;
+            flex-shrink: 0;
+        }
+
+        .nav-tabs .nav-link {
+            color: var(--text-secondary);
+            border: none;
+            padding: 12px 20px;
+            font-weight: 600;
+            font-size: 1rem;
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .nav-tabs .nav-link:hover {
+            color: var(--text-primary);
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .nav-tabs .nav-link.active {
+            color: var(--text-primary);
+            background: var(--primary-gradient);
+            border: none;
+        }
+
+        /* NEW: Status & ML Container */
+        .status-ml-container {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            margin-left: 15px;
+            flex-shrink: 0;
+        }
+
+        .status-ml-wrapper {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 3px 10px;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .status-live {
+            background: var(--success-gradient);
+            animation: pulse 2s infinite;
+        }
+
+        .status-error {
+            background: var(--danger-gradient);
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+
+        /* ML Signal Banner */
+        .ml-banner {
+            padding: 4px 12px;
+            border-radius: 6px;
+            border: 2px solid var(--card-border);
+            background: rgba(0,0,0,0.2);
+            min-width: 120px;
+            text-align: center;
+        }
+
+        .ml-banner .value {
+            font-size: 1.1rem;
+            font-weight: bold;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            transition: all 0.3s ease;
+        }
+
+        .signal-buy { color: var(--ml-buy-color) !important; }
+        .signal-sell { color: var(--ml-sell-color) !important; }
+        .signal-hold { color: var(--ml-hold-color) !important; }
+
+        .ml-confidence-label {
+            font-size: 0.6rem !important;
+            font-weight: 600;
+            color: var(--text-secondary);
+        }
+
+        .top-info-container {
+            flex-grow: 1;
+        }
+
+        .top-info-bar {
+            display: flex;
+            justify-content: flex-end;
+        }
+
+        .info-group {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .info-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .info-item .label {
+            color: var(--text-secondary);
+            font-size: 0.65rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .info-item .value {
+            font-size: 0.9rem;
+            font-weight: 700;
+            color: var(--text-primary);
+            transition: color 0.3s ease;
+        }
+
+        .info-item .value.metric-positive { color: #38ef7d; }
+        .info-item .value.metric-negative { color: #f45c43; }
+        .info-item .value.metric-neutral { color: var(--text-secondary); }
+
+        /* Tab Content - Full Height */
+        .tab-content {
+            flex: 1;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            padding-top: 5px; /* Added to compensate for removed sub-header */
+        }
+
+        .tab-pane {
+            height: 100%;
+            display: none;
+            flex-direction: column;
+        }
+
+        .tab-pane.active {
+            display: flex;
+        }
+
+        .table-container {
+            flex: 1;
+            background: var(--card-bg);
+            backdrop-filter: blur(10px);
+            border: 1px solid var(--card-border);
+            margin: 5px;
+            border-radius: 8px;
+            overflow-y: auto;
+            overflow-x: auto;
+            padding: 8px;
+        }
+
+        .data-table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+        }
+
+        .data-table th {
+            background: rgba(255, 255, 255, 0.1);
+            color: var(--text-secondary);
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.65rem;
+            padding: 6px 4px;
+            text-align: right;
+            border-bottom: 2px solid rgba(255, 255, 255, 0.1);
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+
+        .data-table td {
+            padding: 5px 4px;
+            text-align: right;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
+        .data-table tr:hover { background: rgba(255, 255, 255, 0.05); }
+
+        .data-table tr.atm-row {
+            background: rgba(56, 178, 172, 0.3) !important;
+            font-weight: 700 !important;
+            border-top: 2px solid rgba(56, 178, 172, 0.8) !important;
+            border-bottom: 2px solid rgba(56, 178, 172, 0.8) !important;
+        }
+        
+        .data-table tr.atm-row:hover { background: rgba(56, 178, 172, 0.4) !important; }
+        
+        .strike-column {
+            background: rgba(255, 255, 255, 0.08);
+            font-weight: 700;
+            text-align: center !important;
+            border-left: 2px solid rgba(255, 255, 255, 0.2);
+            border-right: 2px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .strike-itm { color: var(--itm-color); }
+        .strike-atm { color: var(--atm-color); font-size: 1.1em; }
+        .strike-otm { color: var(--otm-color); }
+
+        .pct-change { padding: 2px 6px; border-radius: 3px; display: inline-block; min-width: 50px; font-size: 0.75rem; }
+        .pct-positive { color: var(--itm-color); }
+        .pct-negative { color: var(--otm-color); }
+        .pct-highlight { background: rgba(252, 129, 129, 0.2); border: 1px solid var(--highlight-color); animation: blink 1s infinite; }
+        .diff-value { padding: 2px 8px; border-radius: 3px; display: inline-block; min-width: 60px; font-size: 0.75rem; }
+        .diff-positive { color: #38ef7d; background: rgba(56, 239, 125, 0.2); border: 1px solid rgba(56, 239, 125, 0.35); }
+        .diff-negative { color: #f45c43; background: rgba(244, 92, 67, 0.2); border: 1px solid rgba(244, 92, 67, 0.35); }
+        .diff-neutral { color: var(--text-secondary); }
+        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
+        .price-clickable { cursor: pointer; color: #4FC3F7; font-weight: 700; transition: all 0.2s; }
+        .price-clickable:hover { color: #FFD700; text-decoration: underline; transform: scale(1.05); }
+
+        .positions-container {
+            background: var(--card-bg);
+            border-top: 1px solid var(--card-border);
+            padding: 8px;
+            max-height: 180px;
+            overflow-y: auto;
+        }
+
+        .positions-header { font-size: 0.85rem; font-weight: 600; margin-bottom: 5px; color: var(--text-primary); }
+        .positions-table { width: 100%; font-size: 0.75rem; border-collapse: collapse; }
+        .positions-table th { padding: 5px 8px; text-align: left; color: var(--text-secondary); font-size: 0.7rem; text-transform: uppercase; border-bottom: 1px solid rgba(255, 255, 255, 0.1); }
+        .positions-table td { padding: 6px 8px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
+        .type-badge { padding: 2px 8px; border-radius: 3px; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; }
+        .type-badge.buy { background: rgba(33, 150, 243, 0.2); color: #42a5f5; }
+        .type-badge.sell { background: rgba(255, 107, 107, 0.2); color: #ff6b6b; }
+        .mtm-value { font-weight: 700; font-size: 0.85rem; }
+        .mtm-value.positive { color: #38ef7d; }
+        .mtm-value.negative { color: #ef5350; }
+
+        .modal { position: fixed; z-index: 10000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0, 0, 0, 0.7); backdrop-filter: blur(5px); }
+        .modal-content { background: var(--card-bg); backdrop-filter: blur(10px); margin: 10% auto; padding: 25px; border: 2px solid var(--card-border); border-radius: 12px; width: 380px; max-width: 90%; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5); }
+        .close-modal { color: #aaa; float: right; font-size: 24px; font-weight: bold; cursor: pointer; line-height: 20px; }
+        .close-modal:hover { color: #fff; }
+        .loading { text-align: center; padding: 30px; color: var(--text-secondary); }
+        .spinner { border: 3px solid rgba(255, 255, 255, 0.1); border-radius: 50%; border-top: 3px solid var(--text-primary); width: 35px; height: 35px; animation: spin 1s linear infinite; margin: 0 auto 15px; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div class="container-fluid">
+        <!-- MODIFIED: Main Header with Status & ML moved to top -->
+        <div class="top-header">
+            <!-- Exchange Tabs -->
+            <ul class="nav nav-tabs" id="exchangeTabs" role="tablist">
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link active" id="nse-tab" data-bs-toggle="tab" data-bs-target="#nse-content" 
+                            type="button" role="tab" onclick="switchExchange('NSE')">
+                        <i class="bi bi-robot"></i> NIFTY (NSE)
+                    </button>
+                </li>
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link" id="bse-tab" data-bs-toggle="tab" data-bs-target="#bse-content" 
+                            type="button" role="tab" onclick="switchExchange('BSE')">
+                        <i class="bi bi-robot"></i> SENSEX (BSE)
+                    </button>
+                </li>
+            </ul>
+
+            <!-- NEW: Status & ML Signal Container -->
+            <div class="status-ml-container">
+                <!-- NSE Status/ML (Default Visible) -->
+                <div id="status-ml-NSE" class="status-ml-wrapper">
+                    <span class="status-badge status-live" id="statusBadgeNSE">
+                        <i class="bi bi-circle-fill"></i>
+                        <span id="statusTextNSE">Live</span>
+                    </span>
+                    <div class="info-item ml-banner" id="mlBannerNSE" title="Initializing...">
+                        <div class="label">{{ strings.ml_banner_signal_label }}</div>
+                        <div class="value signal-hold" id="mlSignalNSE">HOLD</div>
+                        <div class="label ml-confidence-label" id="mlConfidenceNSE">--%</div>
+                    </div>
+                </div>
+                <!-- BSE Status/ML (Hidden by default) -->
+                <div id="status-ml-BSE" class="status-ml-wrapper" style="display: none;">
+                    <span class="status-badge status-live" id="statusBadgeBSE">
+                        <i class="bi bi-circle-fill"></i>
+                        <span id="statusTextBSE">Live</span>
+                    </span>
+                    <div class="info-item ml-banner" id="mlBannerBSE" title="Initializing...">
+                        <div class="label">{{ strings.ml_banner_signal_label }}</div>
+                        <div class="value signal-hold" id="mlSignalBSE">HOLD</div>
+                        <div class="label ml-confidence-label" id="mlConfidenceBSE">--%</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Info Panel Container -->
+            <div class="top-info-container">
+                <!-- NSE Info Panel -->
+                <div id="top-info-bar-NSE" class="top-info-bar">
+                    <div class="info-group">
+                        <div class="info-item"><div class="label">NIFTY</div><div class="value" id="niftyPrice">--</div></div>
+                        <div class="info-item"><div class="label">ATM</div><div class="value" id="atmStrikeNSE">--</div></div>
+                        <div class="info-item"><div class="label">PCR</div><div class="value" id="pcrNSE">--</div></div>
+                        <div class="info-item"><div class="label">{{ strings.info_bar_future_symbol_label }}</div><div class="value" id="futureSymbolNSE">--</div></div>
+                        <div class="info-item"><div class="label">{{ strings.info_bar_future_price_label }}</div><div class="value" id="futurePriceNSE">--</div></div>
+                        <div class="info-item"><div class="label">{{ strings.info_bar_future_oi_label }}</div><div class="value" id="futureOiNSE">--</div></div>
+                        <div class="info-item"><div class="label">{{ strings.info_bar_future_oi_change_label }}</div><div class="value metric-neutral" id="futureOiChangeNSE">--%</div></div>
+                        <div class="info-item"><div class="label">{{ strings.info_bar_vix_label }}</div><div class="value" id="vixValue">--</div></div>
+                        <div class="info-item"><div class="label">{{ strings.info_bar_itm_ce_label }}</div><div class="value metric-neutral" id="itmCeNSE">--%</div></div>
+                        <div class="info-item"><div class="label">{{ strings.info_bar_itm_pe_label }}</div><div class="value metric-neutral" id="itmPeNSE">--%</div></div>
+                        <div class="info-item"><div class="label">MTM</div><div class="value" id="mtmNSE">₹0</div></div>
+                        <div class="info-item"><div class="label">P&L</div><div class="value" id="pnlNSE">₹0</div></div>
+                        <div class="info-item"><div class="label">Updated</div><div class="value" id="lastUpdateNSE">--:--</div></div>
+                    </div>
+                </div>
+                <!-- BSE Info Panel -->
+                <div id="top-info-bar-BSE" class="top-info-bar" style="display: none;">
+                    <div class="info-group">
+                        <div class="info-item"><div class="label">SENSEX</div><div class="value" id="sensexPrice">--</div></div>
+                        <div class="info-item"><div class="label">ATM</div><div class="value" id="atmStrikeBSE">--</div></div>
+                        <div class="info-item"><div class="label">PCR</div><div class="value" id="pcrBSE">--</div></div>
+                        <div class="info-item"><div class="label">{{ strings.info_bar_future_symbol_label }}</div><div class="value" id="futureSymbolBSE">--</div></div>
+                        <div class="info-item"><div class="label">{{ strings.info_bar_future_price_label }}</div><div class="value" id="futurePriceBSE">--</div></div>
+                        <div class="info-item"><div class="label">{{ strings.info_bar_future_oi_label }}</div><div class="value" id="futureOiBSE">--</div></div>
+                        <div class="info-item"><div class="label">{{ strings.info_bar_future_oi_change_label }}</div><div class="value metric-neutral" id="futureOiChangeBSE">--%</div></div>
+                        <div class="info-item"><div class="label">{{ strings.info_bar_itm_ce_label }}</div><div class="value metric-neutral" id="itmCeBSE">--%</div></div>
+                        <div class="info-item"><div class="label">{{ strings.info_bar_itm_pe_label }}</div><div class="value metric-neutral" id="itmPeBSE">--%</div></div>
+                        <div class="info-item"><div class="label">MTM</div><div class="value" id="mtmBSE">₹0</div></div>
+                        <div class="info-item"><div class="label">P&L</div><div class="value" id="pnlBSE">₹0</div></div>
+                        <div class="info-item"><div class="label">Updated</div><div class="value" id="lastUpdateBSE">--:--</div></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tab Content -->
+        <div class="tab-content" id="exchangeTabContent">
+            <!-- NSE Tab -->
+            <div class="tab-pane fade show active" id="nse-content" role="tabpanel">
+                <!-- REMOVED: Sub-header no longer needed -->
+                <div class="table-container">
+                    <div id="optionChainNSE">
+                        <div class="loading"><div class="spinner"></div><p>Loading NIFTY option chain...</p></div>
+                    </div>
+                </div>
+                
+                <div class="positions-container">
+                    <div class="positions-header"><i class="bi bi-briefcase-fill"></i> Open Positions</div>
+                    <div id="positionsNSE">
+                        <div style="text-align: center; color: var(--text-secondary); padding: 15px; font-size: 0.8rem;">
+                            No positions. Click price to trade.
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- BSE Tab -->
+            <div class="tab-pane fade" id="bse-content" role="tabpanel">
+                <!-- REMOVED: Sub-header no longer needed -->
+                <div class="table-container">
+                    <div id="optionChainBSE">
+                        <div class="loading"><div class="spinner"></div><p>Loading SENSEX option chain...</p></div>
+                    </div>
+                </div>
+                
+                <div class="positions-container">
+                    <div class="positions-header"><i class="bi bi-briefcase-fill"></i> Open Positions</div>
+                    <div id="positionsBSE">
+                        <div style="text-align: center; color: var(--text-secondary); padding: 15px; font-size: 0.8rem;">
+                            No positions. Click price to trade.
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Order Modal -->
+    <div id="orderModal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <span class="close-modal" onclick="closeOrderModal()">&times;</span>
+            <h2 style="color: var(--text-primary); margin-bottom: 15px; font-size: 1.2rem;">Paper Trade Order</h2>
+            
+            <div style="margin-bottom: 12px; font-size: 0.9rem;">
+                <strong>Exchange:</strong> <span id="modalExchange"></span><br>
+                <strong>Symbol:</strong> <span id="modalSymbol"></span><br>
+                <strong>Type:</strong> <span id="modalType"></span><br>
+                <strong>Price:</strong> ₹<span id="modalPrice"></span>
+            </div>
+            
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-size: 0.9rem;">Quantity:</label>
+                <input type="number" id="modalQty" value="300" min="1" style="width: 100%; padding: 8px; border-radius: 5px; border: 1px solid #ccc; font-size: 0.9rem;">
+            </div>
+            
+            <div style="display: flex; gap: 10px;">
+                <button onclick="placeOrder('B')" style="flex: 1; padding: 10px; background: var(--success-gradient); color: white; border: none; border-radius: 5px; font-weight: bold; cursor: pointer; font-size: 0.9rem;">
+                    <i class="bi bi-arrow-up-circle"></i> BUY
+                </button>
+                <button onclick="placeOrder('S')" style="flex: 1; padding: 10px; background: var(--danger-gradient); color: white; border: none; border-radius: 5px; font-weight: bold; cursor: pointer; font-size: 0.9rem;">
+                    <i class="bi bi-arrow-down-circle"></i> SELL
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script>
+        /* eslint-disable */
+        const socket = io();
+        const intervals = JSON.parse('{{ intervals | tojson | safe }}');
+        const thresholds = JSON.parse('{{ thresholds | tojson | safe }}');
+        const diffThresholdDefaults = JSON.parse('{{ diff_thresholds | tojson | safe }}');
+        const strings = JSON.parse('{{ strings | tojson | safe }}');
+
+        let currentExchange = 'NSE';
+        let exchangeData = { 'NSE': {}, 'BSE': {} };
+
+        function switchExchange(exchange) {
+            currentExchange = exchange;
+
+            // Toggle visibility of the top info bars
+            document.getElementById('top-info-bar-NSE').style.display = (exchange === 'NSE') ? 'flex' : 'none';
+            document.getElementById('top-info-bar-BSE').style.display = (exchange === 'BSE') ? 'flex' : 'none';
+            
+            // NEW: Toggle visibility of status/ML wrapper
+            document.getElementById('status-ml-NSE').style.display = (exchange === 'NSE') ? 'flex' : 'none';
+            document.getElementById('status-ml-BSE').style.display = (exchange === 'BSE') ? 'flex' : 'none';
+
+            if (exchangeData[exchange] && exchangeData[exchange].call_options) {
+                updateUI(exchangeData[exchange], exchange);
+            }
+        }
+
+        socket.on('connect', () => console.log('Connected to server'));
+        socket.on('disconnect', () => console.log('Disconnected from server'));
+
+        socket.on('data_update_NSE', function(data) {
+            exchangeData['NSE'] = data;
+            if (currentExchange === 'NSE') {
+                updateUI(data, 'NSE');
+            }
+        });
+
+        socket.on('data_update_BSE', function(data) {
+            exchangeData['BSE'] = data;
+            if (currentExchange === 'BSE') {
+                updateUI(data, 'BSE');
+            }
+        });
+
+        socket.on('position_closed', function(data) {
+            const pnl = data.realized_pnl || 0;
+            const pnlText = pnl >= 0 ? `Profit: ₹${pnl.toFixed(2)}` : `Loss: ₹${Math.abs(pnl).toFixed(2)}`;
+            alert(`[${data.exchange}] Position Closed!\n${data.exit_reason}\nExit Price: ₹${data.exit_price}\n${pnlText}`);
+        });
+
+        function updateItmChange(value, elementId) {
+            const element = document.getElementById(elementId);
+            if (!element) return;
+            element.classList.remove('metric-positive', 'metric-negative', 'metric-neutral');
+            const numVal = Number(value);
+            if (!Number.isFinite(numVal)) {
+                element.textContent = '--%';
+                element.classList.add('metric-neutral');
+                return;
+            }
+            element.textContent = `${numVal > 0 ? '+' : ''}${numVal.toFixed(1)}%`;
+            element.classList.add(numVal > 0 ? 'metric-positive' : (numVal < 0 ? 'metric-negative' : 'metric-neutral'));
+        }
+
+        function updateUI(data, exchange) {
+            const suffix = exchange;
+            
+            // Status badge (moved to top header)
+            const statusText = document.getElementById(`statusText${suffix}`);
+            if (statusText) {
+                statusText.textContent = data.status || 'Unknown';
+                statusText.parentElement.className = 'status-badge ' + (data.status?.toLowerCase().includes('live') ? 'status-live' : 'status-error');
+            }
+
+            // ML Signal (moved to top header)
+            const mlSignalEl = document.getElementById(`mlSignal${suffix}`);
+            if (mlSignalEl) {
+                const signal = data.ml_signal || 'HOLD';
+                mlSignalEl.textContent = signal;
+                mlSignalEl.className = 'value signal-' + signal.toLowerCase();
+            }
+            document.getElementById(`mlConfidence${suffix}`).textContent = `${((data.ml_confidence || 0) * 100).toFixed(0)}% CONF.`;
+            document.getElementById(`mlBanner${suffix}`).title = data.ml_rationale || 'Initializing...';
+            
+            // Top Header Info
+            document.getElementById(`atmStrike${suffix}`).textContent = data.atm_strike || '--';
+            document.getElementById(exchange === 'NSE' ? 'niftyPrice' : 'sensexPrice').textContent = data.underlying_price?.toFixed(2) || '--';
+            document.getElementById(`futureSymbol${suffix}`).textContent = data.underlying_future_symbol || '--';
+            document.getElementById(`futurePrice${suffix}`).textContent = data.underlying_future_price?.toFixed(2) || '--';
+            document.getElementById(`futureOi${suffix}`).textContent = data.underlying_future_oi ? formatNumber(data.underlying_future_oi) : '--';
+            document.getElementById(`pcr${suffix}`).textContent = data.pcr?.toFixed(2) || '--';
+            if (exchange === 'NSE') document.getElementById('vixValue').textContent = data.vix?.toFixed(2) || '--';
+            document.getElementById(`mtm${suffix}`).textContent = '₹' + Math.round(data.total_mtm || 0);
+            document.getElementById(`pnl${suffix}`).textContent = '₹' + Math.round(data.closed_pnl || 0);
+            document.getElementById(`lastUpdate${suffix}`).textContent = data.last_update || '--:--';
+            
+            updateItmChange(data.percent_oichange_fut_3m, `futureOiChange${suffix}`);
+            updateItmChange(data.itm_oi_ce_pct_change, `itmCe${suffix}`);
+            updateItmChange(data.itm_oi_pe_pct_change, `itmPe${suffix}`);
+            
+            // Main Tables
+            if (data.call_options && data.put_options) updateOptionChain(data.call_options, data.put_options, exchange, data.diff_thresholds);
+            if (data.open_positions !== undefined) updateOpenPositions(data.open_positions, exchange);
+        }
+
+        function updateOptionChain(callOptions, putOptions, exchange, diffConfig) {
+            const container = document.getElementById(`optionChain${exchange}`);
+            if (!callOptions || callOptions.length === 0) {
+                container.innerHTML = '<div class="loading"><p>No data</p></div>';
+                return;
+            }
+            const posThresh = Number(diffConfig?.positive) || 0;
+            const negThresh = Number(diffConfig?.negative) || 0;
+
+            const renderDiff = (diff, theo) => {
+                if (diff == null) return '<td><span class="diff-value">N/A</span></td>';
+                const numDiff = Number(diff);
+                let diffClass = 'diff-neutral';
+                if (numDiff >= posThresh) diffClass = 'diff-positive';
+                else if (numDiff <= -negThresh) diffClass = 'diff-negative';
+                return `<td><span class="diff-value ${diffClass}" title="Theo: ${theo?.toFixed(2)}">${numDiff > 0 ? '+' : ''}${numDiff.toFixed(2)}</span></td>`;
+            };
+
+            const renderPct = (pct, interval) => {
+                if (pct != null) {
+                    const highlight = Math.abs(pct) > thresholds[interval] ? ' pct-highlight' : '';
+                    return `<td><span class="pct-change ${pct >= 0 ? 'pct-positive' : 'pct-negative'}${highlight}">${pct > 0 ? '+' : ''}${pct.toFixed(1)}%</span></td>`;
+                }
+                return '<td><span class="pct-change">N/A</span></td>';
+            };
+
+            let html = '<table class="data-table"><thead><tr>';
+            [...intervals].reverse().forEach(i => html += `<th>OI %Chg (${i}m)</th>`);
+            html += `<th>IV(%)</th><th>OI</th><th>Price</th><th>DIFF</th><th class="strike-column">STRIKE</th><th>Price</th><th>DIFF</th><th>OI</th><th>IV(%)</th>`;
+            intervals.forEach(i => html += `<th>OI %Chg (${i}m)</th>`);
+            html += '</tr></thead><tbody>';
+            
+            callOptions.forEach((call, idx) => {
+                const put = putOptions[idx] || {};
+                html += `<tr class="${call.strike_type === 'atm' ? 'atm-row' : ''}">`;
+                [...intervals].reverse().forEach(i => html += renderPct(call.pct_changes?.[`${i}m`], i));
+                html += `<td>${call.iv?.toFixed(2) || 'N/A'}</td><td>${call.latest_oi != null ? formatNumber(call.latest_oi) : 'N/A'}</td>`;
+                html += call.ltp != null ? `<td class="price-clickable" onclick="showOrderModal('${call.symbol}','CE',${call.ltp},'${exchange}')">${call.ltp.toFixed(1)}</td>` : '<td>N/A</td>';
+                html += renderDiff(call.price_diff, call.theoretical_price);
+                html += `<td class="strike-column strike-${call.strike_type}">${call.strike}</td>`;
+                html += put.ltp != null ? `<td class="price-clickable" onclick="showOrderModal('${put.symbol}','PE',${put.ltp},'${exchange}')">${put.ltp.toFixed(1)}</td>` : '<td>N/A</td>';
+                html += renderDiff(put.price_diff, put.theoretical_price);
+                html += `<td>${put.latest_oi != null ? formatNumber(put.latest_oi) : 'N/A'}</td><td>${put.iv?.toFixed(2) || 'N/A'}</td>`;
+                intervals.forEach(i => html += renderPct(put.pct_changes?.[`${i}m`], i));
+                html += '</tr>';
+            });
+            container.innerHTML = html + '</tbody></table>';
+        }
+
+        function updateOpenPositions(positions, exchange) {
+            const container = document.getElementById(`positions${exchange}`);
+            if (!positions || positions.length === 0) {
+                container.innerHTML = '<div style="text-align:center;color:var(--text-secondary);padding:15px;font-size:0.8rem;">No positions.</div>';
+                return;
+            }
+            let html = '<table class="positions-table"><thead><tr><th>Symbol</th><th>Type</th><th>Qty</th><th>Entry</th><th>Current</th><th>MTM</th><th>Time</th></tr></thead><tbody>';
+            positions.forEach(pos => {
+                html += `<tr><td style="font-size:0.7rem;">${pos.symbol}</td><td><span class="type-badge ${pos.side==='B'?'buy':'sell'}">${pos.side==='B'?'BUY':'SELL'}</span></td><td>${pos.qty}</td><td>₹${pos.entry_price.toFixed(1)}</td><td>₹${pos.current_price.toFixed(1)}</td><td><span class="mtm-value ${pos.mtm>=0?'positive':'negative'}">₹${Math.round(pos.mtm||0)}</span></td><td style="font-size:0.7rem;">${pos.entry_time}</td></tr>`;
+            });
+            container.innerHTML = html + '</tbody></table>';
+        }
+
+        function formatNumber(num) { return num.toLocaleString('en-IN'); }
+
+        let currentOrderData = {};
+        function showOrderModal(symbol, type, price, exchange) {
+            currentOrderData = { symbol, type, price, exchange };
+            document.getElementById('modalExchange').textContent = exchange;
+            document.getElementById('modalSymbol').textContent = symbol;
+            document.getElementById('modalType').textContent = type;
+            document.getElementById('modalPrice').textContent = price.toFixed(1);
+            document.getElementById('orderModal').style.display = 'block';
+        }
+
+        function closeOrderModal() { document.getElementById('orderModal').style.display = 'none'; }
+
+        async function placeOrder(side) {
+            const qty = parseInt(document.getElementById('modalQty').value);
+            if (qty <= 0 || isNaN(qty)) { alert('Please enter valid quantity'); return; }
+            const orderData = { ...currentOrderData, side, qty };
+            try {
+                const res = await fetch('/api/place_order', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(orderData) });
+                const result = await res.json();
+                if (result.success) {
+                    alert(`✓ ${side === 'B' ? 'BUY' : 'SELL'} order placed!\n${orderData.exchange}: ${result.position_id}`);
+                    closeOrderModal();
+                } else alert('Error: ' + result.error);
+            } catch (error) { alert('Error placing order.'); }
+        }
+        window.onclick = e => { if (e.target == document.getElementById('orderModal')) closeOrderModal(); }
+    </script>
+</body>
+</html>
