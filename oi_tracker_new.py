@@ -1086,11 +1086,67 @@ def _build_feature_job_payload(exchange: str,
     }
 
 
+# Throttle tracking per exchange to avoid queue flooding
+_feature_job_throttle: Dict[str, float] = {}
+_feature_job_last_published: Dict[str, datetime] = {}
+
 def _publish_feature_job(exchange: str, payload: dict) -> None:
+    """
+    Publish feature job to queue with throttling and smart queue management.
+    
+    - Throttles rapid updates (configurable via feature_processing_throttle_seconds)
+    - Drops oldest items when queue is full to keep processing recent data
+    - Logs warnings when queue pressure is high
+    """
+    global _feature_job_throttle, _feature_job_last_published
+    
+    # Throttle: Skip if we published too recently
+    from config import get_config
+    throttle_seconds = get_config().feature_processing_throttle_seconds
+    now = now_ist()
+    last_published = _feature_job_last_published.get(exchange)
+    
+    if last_published and (now - last_published).total_seconds() < throttle_seconds:
+        # Skip this update - too soon after last one
+        return
+    
     try:
         tick_queue.put_nowait(payload)
+        _feature_job_last_published[exchange] = now
+        _feature_job_throttle[exchange] = 0
     except Full:
-        logging.warning(f"[{exchange}] Feature queue is full. Dropping payload to keep loop responsive.")
+        # Queue is full - try to make room by dropping oldest items
+        dropped_count = 0
+        max_drops = 10  # Don't drop too many at once
+        
+        try:
+            # Try to remove oldest items to make room
+            while tick_queue.full() and dropped_count < max_drops:
+                try:
+                    tick_queue.get_nowait()  # Remove oldest
+                    dropped_count += 1
+                except Empty:
+                    break
+            
+            # Now try to add the new payload
+            if not tick_queue.full():
+                tick_queue.put_nowait(payload)
+                _feature_job_last_published[exchange] = now
+                if dropped_count > 0:
+                    logging.warning(f"[{exchange}] Feature queue was full. Dropped {dropped_count} old items to make room.")
+            else:
+                # Still full after dropping - skip this update
+                _feature_job_throttle[exchange] = _feature_job_throttle.get(exchange, 0) + 1
+                if _feature_job_throttle[exchange] % 10 == 0:  # Log every 10th drop
+                    try:
+                        queue_size = tick_queue.qsize()
+                    except NotImplementedError:
+                        queue_size = "unknown"
+                    logging.warning(f"[{exchange}] Feature queue persistently full. Skipping updates. Queue size: {queue_size}")
+        except Exception as e:
+            logging.error(f"[{exchange}] Error managing full queue: {e}")
+            # Fallback: just skip this update
+            pass
 
 
 def _emit_health_metrics(handler: ExchangeDataHandler, now: datetime) -> None:

@@ -169,7 +169,8 @@ class AppConfig:
     trade_log_dir: Path = field(default_factory=lambda: Path(os.getenv('OI_TRACKER_TRADE_LOG_DIR', 'trade_logs')))
     
     # Queue and Worker Settings
-    feature_job_queue_size: int = field(default_factory=lambda: _get_env_int('OI_TRACKER_FEATURE_JOB_QUEUE_SIZE', 200))
+    feature_job_queue_size: int = field(default_factory=lambda: _get_env_int('OI_TRACKER_FEATURE_JOB_QUEUE_SIZE', 500))
+    feature_processing_throttle_seconds: float = field(default_factory=lambda: _get_env_float('OI_TRACKER_FEATURE_PROCESSING_THROTTLE_SECONDS', 1.0))
     
     # WebSocket Settings
     websocket_connect_timeout_seconds: int = field(default_factory=lambda: _get_env_int('OI_TRACKER_WEBSOCKET_CONNECT_TIMEOUT_SECONDS', 30))
