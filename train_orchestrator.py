@@ -3,7 +3,11 @@ train_orchestrator.py
 
 Walk-forward AutoML orchestrator that wraps the existing training pipeline.
 Implements the roadmap requirement for multi-model evaluation (LightGBM,
-XGBoost, CatBoost), Optuna tuning per segment, and consolidated reporting.
+XGBoost, CatBoost, RL), Optuna tuning per segment, and consolidated reporting.
+
+Supports:
+- Supervised learning: LightGBM, XGBoost, CatBoost
+- Reinforcement learning: PPO, DQN (via RL family)
 """
 from __future__ import annotations
 
@@ -43,6 +47,16 @@ try:
     from catboost import CatBoostClassifier
 except ImportError:  # pragma: no cover
     CatBoostClassifier = None  # type: ignore
+
+try:
+    from stable_baselines3 import PPO, DQN
+    from models.reinforcement_learning import TradingEnvironment
+    SB3_AVAILABLE = True
+except ImportError:
+    SB3_AVAILABLE = False
+    PPO = None
+    DQN = None
+    TradingEnvironment = None
 
 
 LOGGER = logging.getLogger(__name__)
@@ -227,10 +241,66 @@ class CatBoostFamily(ModelFamily):
         }
 
 
+class RLFamily(ModelFamily):
+    """Reinforcement Learning family (PPO/DQN) for signal generation."""
+    name = "rl"
+    pretty_name = "RL"
+    
+    def __init__(self, algorithm: str = "PPO"):
+        self.algorithm = algorithm.upper()
+        self.pretty_name = f"RL-{self.algorithm}"
+    
+    @property
+    def available(self) -> bool:
+        return SB3_AVAILABLE and PPO is not None and DQN is not None
+    
+    def default_params(self) -> Dict[str, Any]:
+        if self.algorithm == "PPO":
+            return {
+                "learning_rate": 0.0003,
+                "n_steps": 2048,
+                "batch_size": 64,
+                "n_epochs": 10,
+                "gamma": 0.99,
+                "total_timesteps": 10000,
+            }
+        else:  # DQN
+            return {
+                "learning_rate": 0.0001,
+                "buffer_size": 10000,
+                "learning_starts": 1000,
+                "batch_size": 32,
+                "gamma": 0.99,
+                "total_timesteps": 10000,
+            }
+    
+    def build_model(self, params: Dict[str, Any]):
+        # This will be called with environment, not built here
+        raise NotImplementedError("RL models are built with environment")
+    
+    def optuna_space(self, trial: "optuna.trial.Trial") -> Dict[str, Any]:
+        if self.algorithm == "PPO":
+            return {
+                "learning_rate": trial.suggest_float("learning_rate", 0.0001, 0.001, log=True),
+                "n_steps": trial.suggest_int("n_steps", 1024, 4096, step=512),
+                "batch_size": trial.suggest_categorical("batch_size", [32, 64, 128]),
+                "n_epochs": trial.suggest_int("n_epochs", 5, 20),
+            }
+        else:  # DQN
+            return {
+                "learning_rate": trial.suggest_float("learning_rate", 0.00005, 0.0005, log=True),
+                "buffer_size": trial.suggest_int("buffer_size", 5000, 20000, step=5000),
+                "batch_size": trial.suggest_categorical("batch_size", [32, 64, 128]),
+            }
+
+
 FAMILY_REGISTRY: Dict[str, ModelFamily] = {
     "lightgbm": LightGBMFamily(),
     "xgboost": XGBoostFamily(),
     "catboost": CatBoostFamily(),
+    "rl": RLFamily("PPO"),
+    "rl-ppo": RLFamily("PPO"),
+    "rl-dqn": RLFamily("DQN"),
 }
 
 
@@ -272,6 +342,7 @@ def _load_dataset(exchange: str, days: int) -> pd.DataFrame:
 def _generate_segments(index: pd.DatetimeIndex, window_days: int, step_days: int) -> List[SegmentWindow]:
     segments: List[SegmentWindow] = []
     if index.empty:
+        LOGGER.warning("Index is empty, cannot generate segments")
         return segments
 
     window = pd.Timedelta(days=window_days)
@@ -279,6 +350,8 @@ def _generate_segments(index: pd.DatetimeIndex, window_days: int, step_days: int
     cursor = index.min()
     end_limit = index.max()
     segment_id = 1
+    
+    LOGGER.debug(f"Generating segments: cursor={cursor}, end_limit={end_limit}, window={window}, step={step}")
 
     while cursor + window + step <= end_limit:
         train_start = cursor
@@ -337,6 +410,199 @@ def _prepare_xy(frame: pd.DataFrame, features: Sequence[str], encode_labels: boo
     return X, y
 
 
+class GymTradingEnvironmentWrapper:
+    """
+    Wrapper to make TradingEnvironment compatible with stable-baselines3 Gym interface.
+    """
+    def __init__(self, trading_env: TradingEnvironment):
+        self.trading_env = trading_env
+        # Define action space: MultiDiscrete for signal (-1,0,1) and position_size (discretized 0-10)
+        # Flattened to Discrete(33): 3 signals * 11 position levels
+        try:
+            from gymnasium import spaces
+            self.action_space = spaces.Discrete(33)  # 3 signals * 11 position levels
+            # Observation space matches TradingEnvironment state
+            state_dim = len(trading_env._get_state())
+            self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(state_dim,), dtype=np.float32)
+        except ImportError:
+            import gym
+            self.action_space = gym.spaces.Discrete(33)
+            state_dim = len(trading_env._get_state())
+            self.observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(state_dim,), dtype=np.float32)
+    
+    def reset(self, seed=None, options=None):
+        obs = self.trading_env.reset()
+        return obs, {}
+    
+    def step(self, action):
+        # Convert discrete action to RLAction
+        # action: 0-32
+        # signal: action // 11 -> 0,1,2 -> -1,0,1
+        # position_size: (action % 11) / 10.0 -> 0.0 to 1.0
+        signal_map = {0: -1, 1: 0, 2: 1}
+        signal_idx = action // 11
+        position_level = action % 11
+        signal = signal_map.get(signal_idx, 0)
+        position_size = position_level / 10.0
+        
+        from models.reinforcement_learning import RLAction
+        rl_action = RLAction(signal=signal, position_size=position_size)
+        
+        obs, reward, done, info = self.trading_env.step(rl_action)
+        return obs, reward, done, False, info
+
+
+def _train_rl_segment(
+    family: RLFamily,
+    train_df: pd.DataFrame,
+    val_df: pd.DataFrame,
+    feature_cols: List[str],
+    optuna_trials: int,
+) -> Tuple[Dict[str, float], Dict[str, Any], Optional[float]]:
+    """
+    Train RL model on a segment and evaluate on validation data.
+    
+    Returns:
+        Tuple of (metrics, params, optuna_score)
+    """
+    if not SB3_AVAILABLE or TradingEnvironment is None:
+        return {"mean_reward": 0.0, "episodes": 0}, {}, None
+    
+    # Prepare training data with future returns for reward calculation
+    train_df_with_future = train_df.copy()
+    if 'future_return' not in train_df_with_future.columns:
+        # Calculate future return from target (simplified)
+        train_df_with_future['future_return'] = train_df_with_future['target'].astype(float) * 0.01
+    
+    # Create base environment
+    base_env = TradingEnvironment(
+        exchange=family.name,
+        features_df=train_df_with_future[feature_cols + ['future_return']],
+        initial_capital=1_000_000.0
+    )
+    
+    # Wrap for Gym compatibility
+    env = GymTradingEnvironmentWrapper(base_env)
+    
+    base_params = family.default_params()
+    algorithm = family.algorithm
+    total_timesteps = base_params.pop("total_timesteps", 10000)
+    
+    # Optuna tuning for RL
+    tuned_params = base_params.copy()
+    optuna_score = None
+    
+    if optuna_trials > 0 and optuna is not None:
+        def objective(trial: "optuna.trial.Trial") -> float:
+            params = base_params.copy()
+            params.update(family.optuna_space(trial))
+            timesteps = params.pop("total_timesteps", total_timesteps)
+            
+            # Create fresh environment for each trial
+            trial_base_env = TradingEnvironment(
+                exchange=family.name,
+                features_df=train_df_with_future[feature_cols + ['future_return']],
+                initial_capital=1_000_000.0
+            )
+            trial_env = GymTradingEnvironmentWrapper(trial_base_env)
+            
+            if algorithm == "PPO":
+                model = PPO("MlpPolicy", trial_env, verbose=0, **params)
+            else:  # DQN
+                model = DQN("MlpPolicy", trial_env, verbose=0, **params)
+            
+            model.learn(total_timesteps=timesteps)
+            
+            # Evaluate on validation
+            val_df_with_future = val_df.copy()
+            if 'future_return' not in val_df_with_future.columns:
+                val_df_with_future['future_return'] = val_df_with_future['target'].astype(float) * 0.01
+            
+            val_base_env = TradingEnvironment(
+                exchange=family.name,
+                features_df=val_df_with_future[feature_cols + ['future_return']],
+                initial_capital=1_000_000.0
+            )
+            val_env = GymTradingEnvironmentWrapper(val_base_env)
+            
+            # Run evaluation episodes
+            total_reward = 0.0
+            episodes = 0
+            for _ in range(5):  # 5 evaluation episodes
+                obs, _ = val_env.reset()
+                episode_reward = 0.0
+                done = False
+                while not done:
+                    action, _ = model.predict(obs, deterministic=True)
+                    obs, reward, done, truncated, _ = val_env.step(action)
+                    episode_reward += reward
+                total_reward += episode_reward
+                episodes += 1
+            
+            return total_reward / max(episodes, 1)
+        
+        study = optuna.create_study(direction='maximize')
+        study.optimize(objective, n_trials=min(optuna_trials, 5), show_progress_bar=False)  # Limit RL trials
+        tuned_params.update(study.best_params)
+        optuna_score = float(study.best_value) if study.best_value is not None else None
+    
+    # Train final model with tuned params
+    timesteps = tuned_params.pop("total_timesteps", total_timesteps) if "total_timesteps" in tuned_params else total_timesteps
+    
+    if algorithm == "PPO":
+        model = PPO("MlpPolicy", env, verbose=0, **tuned_params)
+    else:  # DQN
+        model = DQN("MlpPolicy", env, verbose=0, **tuned_params)
+    
+    model.learn(total_timesteps=timesteps)
+    
+    # Evaluate on validation
+    val_df_with_future = val_df.copy()
+    if 'future_return' not in val_df_with_future.columns:
+        val_df_with_future['future_return'] = val_df_with_future['target'].astype(float) * 0.01
+    
+    val_base_env = TradingEnvironment(
+        exchange=family.name,
+        features_df=val_df_with_future[feature_cols + ['future_return']],
+        initial_capital=1_000_000.0
+    )
+    val_env = GymTradingEnvironmentWrapper(val_base_env)
+    
+    # Run evaluation
+    total_reward = 0.0
+    episodes = 0
+    episode_rewards = []
+    
+    for _ in range(10):  # 10 evaluation episodes
+        obs, _ = val_env.reset()
+        episode_reward = 0.0
+        done = False
+        steps = 0
+        while not done and steps < len(val_df):
+            action, _ = model.predict(obs, deterministic=True)
+            obs, reward, done, truncated, _ = val_env.step(action)
+            episode_reward += reward
+            steps += 1
+        episode_rewards.append(episode_reward)
+        total_reward += episode_reward
+        episodes += 1
+    
+    mean_reward = total_reward / max(episodes, 1)
+    std_reward = np.std(episode_rewards) if episode_rewards else 0.0
+    
+    # Convert to classification-like metrics for consistency
+    # Use reward as proxy for performance
+    metrics = {
+        "mean_reward": float(mean_reward),
+        "std_reward": float(std_reward),
+        "episodes": episodes,
+        "accuracy": float(np.clip((mean_reward + 1) / 2, 0, 1)),  # Normalize reward to [0,1]
+        "f1_macro": float(np.clip(mean_reward, 0, 1)),  # Use reward as proxy
+    }
+    
+    return metrics, tuned_params, optuna_score
+
+
 def _run_optuna(
     family: ModelFamily,
     X_train: np.ndarray,
@@ -376,10 +642,32 @@ def _run_optuna(
 def run_orchestrator(config: OrchestratorConfig) -> Dict[str, Any]:
     frame = _load_dataset(config.exchange, config.days)
     frame.sort_index(inplace=True)
+    
+    # Diagnostic info
+    if frame.empty:
+        raise RuntimeError(f"No data loaded for {config.exchange}")
+    
+    date_range = frame.index.max() - frame.index.min()
+    required_range = pd.Timedelta(days=config.window_days + config.step_days)
+    
+    LOGGER.info(
+        f"Dataset: {len(frame)} rows, date range: {date_range.days} days "
+        f"(from {frame.index.min()} to {frame.index.max()})"
+    )
+    LOGGER.info(
+        f"Required range for segments: {required_range.days} days "
+        f"(window={config.window_days}, step={config.step_days})"
+    )
+    
     segments = _generate_segments(frame.index, config.window_days, config.step_days)
 
     if not segments:
-        raise RuntimeError("Walk-forward segmentation produced zero windows. Increase lookback or adjust window/step.")
+        raise RuntimeError(
+            f"Walk-forward segmentation produced zero windows. "
+            f"Data range: {date_range.days} days, Required: {required_range.days} days. "
+            f"Increase --days (current: {config.days}) or reduce --window-days (current: {config.window_days}) "
+            f"or --step-days (current: {config.step_days})."
+        )
 
     families = _select_families(config.families)
     if not families:
@@ -422,37 +710,51 @@ def run_orchestrator(config: OrchestratorConfig) -> Dict[str, Any]:
         X_val, y_val = _prepare_xy(val_df, feature_cols_with_regime)
 
         for family in families:
-            # XGBoost and CatBoost require labels starting from 0
-            needs_encoding = family.name in ("xgboost", "catboost")
-            y_train_encoded = _encode_labels(y_train) if needs_encoding else y_train
-            
-            base_params = family.default_params()
-            tuned_params, optuna_score = _run_optuna(family, X_train, y_train, X_val, y_val, base_params, config.optuna_trials)
+            if family.name == "rl":
+                # RL training is different - uses environment
+                metrics, tuned_params, optuna_score = _train_rl_segment(
+                    family, train_df, val_df, feature_cols_with_regime, config.optuna_trials
+                )
+                sample_counts = {"train": len(train_df), "validation": len(val_df)}
+                result = SegmentResult(segment, family.pretty_name, metrics, tuned_params, optuna_score, sample_counts)
+                results.append(result)
+                LOGGER.info(
+                    "Segment %s | %s | Reward %.3f | Episodes %d",
+                    segment.segment_id, family.pretty_name, 
+                    metrics.get("mean_reward", 0.0), metrics.get("episodes", 0)
+                )
+            else:
+                # XGBoost and CatBoost require labels starting from 0
+                needs_encoding = family.name in ("xgboost", "catboost")
+                y_train_encoded = _encode_labels(y_train) if needs_encoding else y_train
+                
+                base_params = family.default_params()
+                tuned_params, optuna_score = _run_optuna(family, X_train, y_train, X_val, y_val, base_params, config.optuna_trials)
 
-            model = family.build_model(tuned_params)
-            model.fit(X_train, y_train_encoded)
-            preds = model.predict(X_val)
-            
-            # Decode predictions if we encoded labels
-            if needs_encoding:
-                preds = _decode_labels(preds)
+                model = family.build_model(tuned_params)
+                model.fit(X_train, y_train_encoded)
+                preds = model.predict(X_val)
+                
+                # Decode predictions if we encoded labels
+                if needs_encoding:
+                    preds = _decode_labels(preds)
 
-            report = classification_report(y_val, preds, zero_division=0, output_dict=True)
-            metrics = {
-                "accuracy": float(report.get("accuracy", 0.0)),
-                "f1_macro": float(report.get("macro avg", {}).get("f1-score", 0.0)),
-                "f1_weighted": float(report.get("weighted avg", {}).get("f1-score", 0.0)),
-                "precision_macro": float(report.get("macro avg", {}).get("precision", 0.0)),
-                "recall_macro": float(report.get("macro avg", {}).get("recall", 0.0)),
-            }
+                report = classification_report(y_val, preds, zero_division=0, output_dict=True)
+                metrics = {
+                    "accuracy": float(report.get("accuracy", 0.0)),
+                    "f1_macro": float(report.get("macro avg", {}).get("f1-score", 0.0)),
+                    "f1_weighted": float(report.get("weighted avg", {}).get("f1-score", 0.0)),
+                    "precision_macro": float(report.get("macro avg", {}).get("precision", 0.0)),
+                    "recall_macro": float(report.get("macro avg", {}).get("recall", 0.0)),
+                }
 
-            sample_counts = {"train": len(train_df), "validation": len(val_df)}
-            result = SegmentResult(segment, family.pretty_name, metrics, tuned_params, optuna_score, sample_counts)
-            results.append(result)
-            LOGGER.info(
-                "Segment %s | %s | Acc %.3f | F1 %.3f",
-                segment.segment_id, family.pretty_name, metrics["accuracy"], metrics["f1_macro"]
-            )
+                sample_counts = {"train": len(train_df), "validation": len(val_df)}
+                result = SegmentResult(segment, family.pretty_name, metrics, tuned_params, optuna_score, sample_counts)
+                results.append(result)
+                LOGGER.info(
+                    "Segment %s | %s | Acc %.3f | F1 %.3f",
+                    segment.segment_id, family.pretty_name, metrics["accuracy"], metrics["f1_macro"]
+                )
 
     if not results:
         raise RuntimeError("No successful segments were evaluated.")
@@ -462,7 +764,11 @@ def run_orchestrator(config: OrchestratorConfig) -> Dict[str, Any]:
         family_results = [res for res in results if res.family == family.pretty_name]
         if not family_results:
             continue
-        best_segment = max(family_results, key=lambda r: r.metrics.get("f1_macro", 0.0))
+        # RL uses mean_reward, others use f1_macro
+        if family.name == "rl":
+            best_segment = max(family_results, key=lambda r: r.metrics.get("mean_reward", 0.0))
+        else:
+            best_segment = max(family_results, key=lambda r: r.metrics.get("f1_macro", 0.0))
         best_by_family[family.pretty_name] = {
             "segment_id": best_segment.segment.segment_id,
             "metrics": best_segment.metrics,
@@ -510,10 +816,10 @@ def parse_args() -> OrchestratorConfig:
     parser = argparse.ArgumentParser(description="Walk-forward AutoML orchestrator for OI Gemini.")
     parser.add_argument("--exchange", required=True, choices=["NSE", "BSE"])
     parser.add_argument("--days", type=int, default=150, help="Total lookback window in days.")
-    parser.add_argument("--window-days", type=int, default=45, help="Training window size for each segment.")
-    parser.add_argument("--step-days", type=int, default=15, help="Step size / validation horizon in days.")
+    parser.add_argument("--window-days", type=int, default=30, help="Training window size for each segment.")
+    parser.add_argument("--step-days", type=int, default=7, help="Step size / validation horizon in days.")
     parser.add_argument("--families", nargs="+", default=["lightgbm", "xgboost", "catboost"],
-                        help="Model families to evaluate.")
+                        help="Model families to evaluate. Options: lightgbm, xgboost, catboost, rl, rl-ppo, rl-dqn")
     parser.add_argument("--optuna-trials", type=int, default=10, help="Trials per segment (0 to skip).")
     parser.add_argument("--output", type=Path, default=None, help="Optional override path for the JSON summary.")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
