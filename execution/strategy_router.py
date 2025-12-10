@@ -110,7 +110,31 @@ class AdvancedStrategyRouter:
         # Reinforcement Learning (optional)
         if RL_AVAILABLE:
             try:
-                self.rl_strategy = RLStrategy(self.exchange, algorithm="PPO")
+                # Import config to get RL settings
+                from config import get_config
+                config = get_config()
+                
+                # Determine if we should use ensemble
+                use_ensemble = config.rl_use_ensemble or config.rl_algorithm.upper() == "ENSEMBLE"
+                
+                if use_ensemble:
+                    # Load both PPO and DQN models
+                    self.rl_strategy = RLStrategy(
+                        self.exchange,
+                        use_ensemble=True,
+                        ppo_model_path=config.rl_ppo_model_path if config.rl_ppo_model_path else None,
+                        dqn_model_path=config.rl_dqn_model_path if config.rl_dqn_model_path else None,
+                    )
+                else:
+                    # Single algorithm mode
+                    model_path = config.rl_model_path if hasattr(config, 'rl_model_path') else None
+                    algorithm = config.rl_algorithm if hasattr(config, 'rl_algorithm') else "PPO"
+                    self.rl_strategy = RLStrategy(
+                        self.exchange,
+                        model_path=model_path,
+                        algorithm=algorithm,
+                    )
+                
                 if not self.rl_strategy.model_loaded:
                     LOGGER.debug(f"[{self.exchange}] RL models not available")
             except Exception as e:

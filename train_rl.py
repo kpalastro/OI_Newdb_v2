@@ -1,19 +1,30 @@
 """
 Train RL Execution Model (Phase 2).
 
-This script trains a PPO agent for the RLExecutor using synthetic tick data derived 
-from historical OHLC candles. It generates the 'models/rl_execution_model.zip' artifact
-required to enable RL-based execution in the main application.
+This script trains PPO and/or DQN agents for the RLExecutor using synthetic tick data derived 
+from historical OHLC candles. It generates model artifacts required to enable RL-based execution 
+in the main application.
+
+Usage:
+    # Train PPO only
+    python train_rl.py --algorithm PPO
+    
+    # Train DQN only
+    python train_rl.py --algorithm DQN
+    
+    # Train both (for ensemble)
+    python train_rl.py --algorithm BOTH
 """
 import logging
 import os
 import sys
+import argparse
 from pathlib import Path
 from typing import List, Dict, Any
 
 import numpy as np
 import pandas as pd
-from stable_baselines3 import PPO
+from stable_baselines3 import PPO, DQN
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -60,8 +71,15 @@ def generate_synthetic_ticks(df: pd.DataFrame) -> List[Dict[str, Any]]:
     
     return ticks
 
-def train_rl_model(exchange: str = 'NSE', days: int = 30):
-    """Train the RL execution model."""
+def train_rl_model(exchange: str = 'NSE', days: int = 30, algorithm: str = "PPO"):
+    """
+    Train the RL execution model.
+    
+    Args:
+        exchange: Exchange name (NSE, BSE, etc.)
+        days: Number of days of historical data to use
+        algorithm: Algorithm to train - "PPO", "DQN", or "BOTH"
+    """
     
     # 1. Load Data
     db = get_db()
@@ -69,13 +87,6 @@ def train_rl_model(exchange: str = 'NSE', days: int = 30):
     end_date = today_ist() + timedelta(days=1)
     
     LOGGER.info(f"Loading historical data for {exchange} from {start_date} to {end_date}...")
-    
-    # We use 'load_historical_data_for_ml' or similar. 
-    # Since we need generic OHLC, we can query recent active tokens or a specific index.
-    # For simplicity, let's try to load NIFTY 50 futures data if possible, or just raw option data.
-    # Actually, let's just use whatever `load_historical_data_for_ml` gives us, usually it returns the processed features
-    # but we need raw candles. Let's use `db.fetch_market_data_calib` or similar if available, 
-    # or just use the `raw_data` from ML load.
     
     df = db.load_historical_data_for_ml(exchange, start_date, end_date)
     
@@ -103,24 +114,67 @@ def train_rl_model(exchange: str = 'NSE', days: int = 30):
     LOGGER.info("Initializing Execution Environment...")
     env = ExecutionEnvironment(tick_data=ticks)
     
-    # 4. Train Agent
-    LOGGER.info("Starting PPO Training...")
-    model = PPO("MlpPolicy", env, verbose=1, learning_rate=0.0003, n_steps=2048)
+    output_dir = Path("models")
+    output_dir.mkdir(exist_ok=True)
     
-    try:
-        model.learn(total_timesteps=10000)
-        LOGGER.info("Training complete.")
-        
-        # 5. Save Model
-        output_dir = Path("models")
-        output_dir.mkdir(exist_ok=True)
-        model_path = output_dir / "rl_execution_model.zip"
-        
-        model.save(str(model_path))
-        LOGGER.info(f"Model saved to {model_path}")
-        
-    except Exception as e:
-        LOGGER.error(f"Training failed: {e}")
+    ppo_model = None
+    dqn_model = None
+    
+    # 4. Train PPO
+    if algorithm.upper() in ["PPO", "BOTH"]:
+        LOGGER.info("Starting PPO Training...")
+        try:
+            ppo_model = PPO("MlpPolicy", env, verbose=1, learning_rate=0.0003, n_steps=2048)
+            ppo_model.learn(total_timesteps=10000)
+            LOGGER.info("PPO training complete.")
+            
+            ppo_model_path = output_dir / "rl_ppo_model.zip"
+            ppo_model.save(str(ppo_model_path))
+            LOGGER.info(f"PPO model saved to {ppo_model_path}")
+        except Exception as e:
+            LOGGER.error(f"PPO training failed: {e}")
+    
+    # 5. Train DQN
+    if algorithm.upper() in ["DQN", "BOTH"]:
+        LOGGER.info("Starting DQN Training...")
+        try:
+            dqn_model = DQN("MlpPolicy", env, verbose=1, learning_rate=0.0001, buffer_size=10000)
+            dqn_model.learn(total_timesteps=10000)
+            LOGGER.info("DQN training complete.")
+            
+            dqn_model_path = output_dir / "rl_dqn_model.zip"
+            dqn_model.save(str(dqn_model_path))
+            LOGGER.info(f"DQN model saved to {dqn_model_path}")
+        except Exception as e:
+            LOGGER.error(f"DQN training failed: {e}")
+    
+    # 6. Save default model (for backward compatibility)
+    if algorithm.upper() == "PPO" and ppo_model is not None:
+        default_model_path = output_dir / "rl_execution_model.zip"
+        ppo_model.save(str(default_model_path))
+        LOGGER.info(f"Default model saved to {default_model_path}")
 
 if __name__ == "__main__":
-    train_rl_model()
+    parser = argparse.ArgumentParser(description="Train RL execution models")
+    parser.add_argument(
+        "--algorithm",
+        type=str,
+        default="PPO",
+        choices=["PPO", "DQN", "BOTH"],
+        help="Algorithm to train: PPO, DQN, or BOTH (for ensemble)"
+    )
+    parser.add_argument(
+        "--exchange",
+        type=str,
+        default="NSE",
+        help="Exchange name (default: NSE)"
+    )
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=30,
+        help="Number of days of historical data (default: 30)"
+    )
+    
+    args = parser.parse_args()
+    train_rl_model(exchange=args.exchange, days=args.days, algorithm=args.algorithm)
