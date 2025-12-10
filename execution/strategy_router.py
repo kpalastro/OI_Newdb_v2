@@ -195,13 +195,27 @@ class AdvancedStrategyRouter:
                 action = self.rl_strategy.predict(state.features)
                 signal_map = {-1: 'SELL', 0: 'HOLD', 1: 'BUY'}
                 signal = signal_map.get(action.signal, 'HOLD')
+                
+                # Track RL contribution
+                algorithm_info = 'ENSEMBLE' if self.rl_strategy.use_ensemble else self.rl_strategy.algorithm
+                metadata = {
+                    'position_size': action.position_size,
+                    'rl_algorithm': algorithm_info,
+                    'rl_ppo_loaded': self.rl_strategy.ppo_loaded if hasattr(self.rl_strategy, 'ppo_loaded') else False,
+                    'rl_dqn_loaded': self.rl_strategy.dqn_loaded if hasattr(self.rl_strategy, 'dqn_loaded') else False,
+                }
+                
                 signals.append({
                     'signal': signal,
                     'confidence': abs(action.position_size),  # Use position size as confidence proxy
                     'source': 'rl',
-                    'rationale': f'RL {self.rl_strategy.algorithm} action',
-                    'metadata': {'position_size': action.position_size},
+                    'rationale': f'RL {algorithm_info} action (signal={action.signal}, pos={action.position_size:.3f})',
+                    'metadata': metadata,
                 })
+                LOGGER.info(
+                    f"[{self.exchange}] RL Signal Generated: {signal} "
+                    f"(confidence={abs(action.position_size):.3f}, algorithm={algorithm_info})"
+                )
             except Exception as e:
                 LOGGER.debug(f"[{self.exchange}] RL signal generation failed: {e}")
         

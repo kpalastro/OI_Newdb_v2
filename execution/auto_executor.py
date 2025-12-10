@@ -495,7 +495,11 @@ class AutoExecutor:
                  spread=spread,
                  imbalance=imbalance
              )
-             LOGGER.debug(f"[{self.exchange}] RL Execution: Offset={rl_placement.price_offset:.2f}, Agg={rl_placement.aggression}")
+             LOGGER.info(
+                 f"[{self.exchange}] RL Execution Used: Symbol={symbol}, "
+                 f"Offset={rl_placement.price_offset:.3f}, Aggression={rl_placement.aggression}, "
+                 f"FillProb={rl_placement.fill_probability_est:.2f}"
+             )
 
         if rl_placement:
             # Use RL decision

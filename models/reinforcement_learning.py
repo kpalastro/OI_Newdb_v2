@@ -210,19 +210,32 @@ class RLStrategy:
             RLAction with signal and position_size
         """
         if not self.model_loaded:
+            LOGGER.debug(f"[{self.exchange}] RL Strategy: Model not loaded, returning HOLD")
             return RLAction(signal=0, position_size=0.0)
         
         # Ensemble mode: combine predictions from both models
         if self.use_ensemble and (self.ppo_loaded or self.dqn_loaded):
-            return self._ensemble_predict(state)
+            action = self._ensemble_predict(state)
+            LOGGER.info(
+                f"[{self.exchange}] RL Strategy (ENSEMBLE): Signal={action.signal}, "
+                f"PositionSize={action.position_size:.3f}, "
+                f"PPO={self.ppo_loaded}, DQN={self.dqn_loaded}"
+            )
+            return action
         
         # Single model mode
         if self.model is None:
+            LOGGER.debug(f"[{self.exchange}] RL Strategy: Model is None, returning HOLD")
             return RLAction(signal=0, position_size=0.0)
         
         try:
             action, _ = self.model.predict(state, deterministic=True)
-            return self._parse_action(action)
+            parsed_action = self._parse_action(action)
+            LOGGER.info(
+                f"[{self.exchange}] RL Strategy ({self.algorithm}): Signal={parsed_action.signal}, "
+                f"PositionSize={parsed_action.position_size:.3f}"
+            )
+            return parsed_action
         except Exception as e:
             LOGGER.error(f"[{self.exchange}] RL prediction error: {e}")
             return RLAction(signal=0, position_size=0.0)
@@ -297,6 +310,12 @@ class ExecutionEnvironment(gym.Env if gym else object):
     """
     RL Environment for Order Execution optimization.
     Optimizes placement price and timing to minimize slippage.
+    
+    Uses Discrete action space (flattened) compatible with both PPO and DQN:
+    - 42 discrete actions (0-41)
+    - action = price_offset_level + (aggression * 21)
+    - price_offset_level: 0-20 (maps to -2.0 to +2.0 ticks)
+    - aggression: 0 (Passive) or 1 (Aggressive)
     """
     def __init__(self, tick_data: List[Dict[str, Any]], target_quantity: int = 1):
         if not SB3_AVAILABLE:
@@ -306,13 +325,13 @@ class ExecutionEnvironment(gym.Env if gym else object):
         self.target_quantity = target_quantity
         self.current_step = 0
         
-        # Action Space: [Price Offset (Continuous), Aggression (Discrete)]
-        # Price Offset: -2.0 to +2.0 ticks
-        # Aggression: 0 or 1
-        self.action_space = spaces.Dict({
-            "price_offset": spaces.Box(low=-2.0, high=2.0, shape=(1,), dtype=np.float32),
-            "aggression": spaces.Discrete(2)
-        })
+        # Action Space: Discrete (flattened) for compatibility with both PPO and DQN
+        # Price Offset: Discretized into 21 levels (-2.0 to +2.0 in 0.2 steps)
+        # Aggression: 2 levels (0=Passive, 1=Aggressive)
+        # Flattened: 21 * 2 = 42 discrete actions
+        # action = price_offset_level + (aggression * 21)
+        # This is compatible with both PPO and DQN
+        self.action_space = spaces.Discrete(42)
         
         # State Space: [Spread, Imbalance, Volatility, Time Remaining]
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(4,), dtype=np.float32)
@@ -322,9 +341,18 @@ class ExecutionEnvironment(gym.Env if gym else object):
         return self._get_obs(), {}
         
     def step(self, action):
-        # Unpack action
-        price_offset = float(action["price_offset"][0])
-        aggression = int(action["aggression"])
+        # Unpack action from Discrete space (flattened)
+        # action is an integer 0-41
+        # action = price_offset_level + (aggression * 21)
+        # So: price_offset_level = action % 21, aggression = action // 21
+        action_int = int(action) if not isinstance(action, np.ndarray) else int(action.item())
+        action_int = np.clip(action_int, 0, 41)
+        
+        price_offset_level = action_int % 21
+        aggression = action_int // 21
+        
+        # Convert price_offset_level (0-20) to actual price offset (-2.0 to +2.0)
+        price_offset = -2.0 + (price_offset_level * 4.0 / 20.0)  # Map 0-20 to -2.0 to +2.0
         
         # Simulate Fill
         tick = self.tick_data[self.current_step]
@@ -456,14 +484,30 @@ class RLExecutor:
         
         try:
             action, _ = self.model.predict(obs, deterministic=True)
-            price_offset = float(action["price_offset"][0]) if isinstance(action, dict) else float(action[0])
-            aggression = int(action["aggression"]) if isinstance(action, dict) else int(action[1]) if len(action)>1 else 0
+            # Action is now a Discrete integer (0-41)
+            # action = price_offset_level + (aggression * 21)
+            action_int = int(action) if not isinstance(action, np.ndarray) else int(action.item())
+            action_int = np.clip(action_int, 0, 41)
             
-            return PlacementDetails(
+            price_offset_level = action_int % 21
+            aggression = action_int // 21
+            
+            # Convert price_offset_level (0-20) to actual price offset (-2.0 to +2.0)
+            price_offset = -2.0 + (price_offset_level * 4.0 / 20.0)  # Map 0-20 to -2.0 to +2.0
+            
+            placement = PlacementDetails(
                 price_offset=price_offset,
                 aggression=aggression,
                 fill_probability_est=0.8 if aggression == 1 else 0.4
             )
+            
+            LOGGER.info(
+                f"[{self.exchange}] RL Executor ({self.algorithm}): "
+                f"PriceOffset={price_offset:.3f}, Aggression={aggression}, "
+                f"FillProb={placement.fill_probability_est:.2f}"
+            )
+            
+            return placement
         except Exception as e:
             LOGGER.error(f"[{self.exchange}] RLExecutor prediction error: {e}")
             return PlacementDetails(price_offset=0.0, aggression=0, fill_probability_est=0.5)
@@ -476,8 +520,17 @@ class RLExecutor:
         if self.ppo_ready:
             try:
                 action, _ = self.ppo_model.predict(obs, deterministic=True)
-                price_offset = float(action["price_offset"][0]) if isinstance(action, dict) else float(action[0])
-                aggression = int(action["aggression"]) if isinstance(action, dict) else int(action[1]) if len(action)>1 else 0
+                # Action is now a Discrete integer (0-41)
+                # action = price_offset_level + (aggression * 21)
+                action_int = int(action) if not isinstance(action, np.ndarray) else int(action.item())
+                action_int = np.clip(action_int, 0, 41)
+                
+                price_offset_level = action_int % 21
+                aggression = action_int // 21
+                
+                # Convert price_offset_level (0-20) to actual price offset (-2.0 to +2.0)
+                price_offset = -2.0 + (price_offset_level * 4.0 / 20.0)  # Map 0-20 to -2.0 to +2.0
+                
                 placements.append(PlacementDetails(
                     price_offset=price_offset,
                     aggression=aggression,
@@ -490,8 +543,17 @@ class RLExecutor:
         if self.dqn_ready:
             try:
                 action, _ = self.dqn_model.predict(obs, deterministic=True)
-                price_offset = float(action["price_offset"][0]) if isinstance(action, dict) else float(action[0])
-                aggression = int(action["aggression"]) if isinstance(action, dict) else int(action[1]) if len(action)>1 else 0
+                # Action is now a Discrete integer (0-41)
+                # action = price_offset_level + (aggression * 21)
+                action_int = int(action) if not isinstance(action, np.ndarray) else int(action.item())
+                action_int = np.clip(action_int, 0, 41)
+                
+                price_offset_level = action_int % 21
+                aggression = action_int // 21
+                
+                # Convert price_offset_level (0-20) to actual price offset (-2.0 to +2.0)
+                price_offset = -2.0 + (price_offset_level * 4.0 / 20.0)  # Map 0-20 to -2.0 to +2.0
+                
                 placements.append(PlacementDetails(
                     price_offset=price_offset,
                     aggression=aggression,

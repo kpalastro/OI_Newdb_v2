@@ -1,0 +1,43 @@
+{
+  "timestamp": "2025-12-10T12:13:12.031362",
+  "recommendations": {
+    "total": 39859,
+    "rl_primary_count": 0,
+    "rl_primary_pct": 0.0,
+    "rl_in_ensemble_count": 0,
+    "rl_in_ensemble_pct": 0.0,
+    "rl_used_any_count": 0,
+    "rl_used_any_pct": 0.0,
+    "by_exchange": {
+      "BANKNIFTY_MONTHLY": {
+        "rl_primary": 0,
+        "rl_ensemble": 0,
+        "rl_any": 0
+      },
+      "BSE": {
+        "rl_primary": 0,
+        "rl_ensemble": 0,
+        "rl_any": 0
+      },
+      "NSE": {
+        "rl_primary": 0,
+        "rl_ensemble": 0,
+        "rl_any": 0
+      },
+      "NSE_MONTHLY": {
+        "rl_primary": 0,
+        "rl_ensemble": 0,
+        "rl_any": 0
+      }
+    }
+  },
+  "executions": {
+    "total": 304,
+    "rl_execution_count": 0,
+    "rl_execution_pct": 0.0
+  },
+  "summary": {
+    "rl_contribution_level": "low",
+    "rl_active": false
+  }
+}

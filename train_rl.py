@@ -30,7 +30,7 @@ from stable_baselines3 import PPO, DQN
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from models.reinforcement_learning import ExecutionEnvironment
-from database_new import get_db
+import database_new as db
 from time_utils import today_ist, timedelta
 
 # Configure logging
@@ -82,7 +82,6 @@ def train_rl_model(exchange: str = 'NSE', days: int = 30, algorithm: str = "PPO"
     """
     
     # 1. Load Data
-    db = get_db()
     start_date = today_ist() - timedelta(days=days)
     end_date = today_ist() + timedelta(days=1)
     
@@ -94,17 +93,33 @@ def train_rl_model(exchange: str = 'NSE', days: int = 30, algorithm: str = "PPO"
         LOGGER.error("No data found for training.")
         return
 
+    LOGGER.info(f"Loaded {len(df)} rows with columns: {list(df.columns)[:10]}...")  # Show first 10 columns
+    
     # Ensure required columns exist
     if 'close' not in df.columns:
         # Fallback if names differ (e.g. underlying_price)
         if 'underlying_price' in df.columns:
-            df['close'] = df['underlying_price']
-            df['high'] = df['underlying_price'] * 1.001 # Dummy
-            df['low'] = df['underlying_price'] * 0.999 # Dummy
+            # Ensure underlying_price is a Series, not DataFrame
+            underlying_price_series = df['underlying_price']
+            if isinstance(underlying_price_series, pd.DataFrame):
+                # If it's a DataFrame, take the first column or first row
+                underlying_price_series = underlying_price_series.iloc[:, 0] if underlying_price_series.shape[1] > 0 else underlying_price_series.iloc[0]
+            
+            df['close'] = underlying_price_series
+            df['high'] = underlying_price_series * 1.001  # Dummy
+            df['low'] = underlying_price_series * 0.999   # Dummy
             df['volume'] = 1000
+            LOGGER.info("Created OHLC columns from underlying_price")
         else:
-             LOGGER.error("Dataframe missing 'close' or 'underlying_price' column.")
-             return
+            LOGGER.error(f"Dataframe missing 'close' or 'underlying_price' column. Available columns: {list(df.columns)}")
+            return
+    
+    # Ensure we have the required columns for tick generation
+    required_cols = ['close', 'high', 'low', 'volume']
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        LOGGER.error(f"Missing required columns: {missing_cols}")
+        return
 
     # 2. Generate Synthetic Ticks from Candles
     # Since we don't have high-freq tick data stored, we simulate it.

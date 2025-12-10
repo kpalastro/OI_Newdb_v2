@@ -149,7 +149,7 @@ class AppConfig:
     rl_algorithm: str = field(default_factory=lambda: os.getenv('OI_TRACKER_RL_ALGORITHM', 'PPO'))  # PPO, DQN, or ENSEMBLE
     rl_ppo_model_path: str = field(default_factory=lambda: os.getenv('OI_TRACKER_RL_PPO_MODEL_PATH', 'models/rl_ppo_model.zip'))
     rl_dqn_model_path: str = field(default_factory=lambda: os.getenv('OI_TRACKER_RL_DQN_MODEL_PATH', 'models/rl_dqn_model.zip'))
-    rl_use_ensemble: bool = field(default_factory=lambda: _get_env_bool('OI_TRACKER_RL_USE_ENSEMBLE', False))
+    rl_use_ensemble: bool = field(default_factory=lambda: _get_env_bool('OI_TRACKER_RL_USE_ENSEMBLE', True))
     
     # End-of-Day Position Management
     auto_exec_close_all_positions_eod: bool = field(default_factory=lambda: _get_env_bool('OI_TRACKER_AUTO_EXEC_CLOSE_ALL_POSITIONS_EOD', True))
