@@ -295,6 +295,8 @@ def initialize_database():
                     sentiment_score_100 DOUBLE PRECISION,
                     sentiment_confidence_100 DOUBLE PRECISION,
                     trin_100 DOUBLE PRECISION,
+                    sentiment_score DOUBLE PRECISION,
+                    sentiment_confidence DOUBLE PRECISION,
                     created_at TIMESTAMP DEFAULT NOW()
                 )
                 ''',
@@ -470,9 +472,9 @@ def migrate_database():
             """)
             macro_cols = {row[0] for row in cursor.fetchall()}
             
-            # Remove old sentiment columns (if they exist)
+            # Remove old sentiment columns (if they exist) - but keep sentiment_score and sentiment_confidence
             old_sentiment_cols = [
-                'sentiment_score', 'sentiment_confidence', 'sentiment_summary', 
+                'sentiment_summary', 
                 'sentiment_drivers', 'news_sentiment_score', 'news_sentiment_summary'
             ]
             for col in old_sentiment_cols:
@@ -493,6 +495,17 @@ def migrate_database():
                 ('trin_100', 'DOUBLE PRECISION'),
             ]
             for col_name, col_type in new_sentiment_cols:
+                if col_name not in macro_cols:
+                    cursor.execute(f'ALTER TABLE macro_signals ADD COLUMN {col_name} {col_type}')
+                    logging.info(f"Added column {col_name} to macro_signals")
+            
+            # Add aggregated sentiment_score and sentiment_confidence columns (computed from _50 and _100)
+            # These are convenience columns that aggregate the NIFTY50 and NIFTY100 sentiment
+            aggregated_sentiment_cols = [
+                ('sentiment_score', 'DOUBLE PRECISION'),
+                ('sentiment_confidence', 'DOUBLE PRECISION'),
+            ]
+            for col_name, col_type in aggregated_sentiment_cols:
                 if col_name not in macro_cols:
                     cursor.execute(f'ALTER TABLE macro_signals ADD COLUMN {col_name} {col_type}')
                     logging.info(f"Added column {col_name} to macro_signals")
@@ -1162,6 +1175,11 @@ def save_macro_signals(exchange: str, fii_flow: float | None = None, dii_flow: f
         sentiment_score_100: NIFTY100 sentiment score (0-100)
         sentiment_confidence_100: NIFTY100 confidence (0-100)
         trin_100: NIFTY100 TRIN value
+    
+    Note:
+        sentiment_score and sentiment_confidence are computed as:
+        - Average of _50 and _100 values if both are available
+        - Otherwise, use whichever value is available
     """
     if timestamp is None:
         timestamp = now_ist()
@@ -1175,6 +1193,24 @@ def save_macro_signals(exchange: str, fii_flow: float | None = None, dii_flow: f
             conn = get_db_connection()
             cursor = conn.cursor()
             ph = _get_placeholder()
+            # Compute aggregated sentiment_score and sentiment_confidence
+            # Use average of _50 and _100 if both are available, otherwise use whichever is available
+            sentiment_score = None
+            sentiment_confidence = None
+            if sentiment_score_50 is not None and sentiment_score_100 is not None:
+                sentiment_score = (sentiment_score_50 + sentiment_score_100) / 2.0
+            elif sentiment_score_50 is not None:
+                sentiment_score = sentiment_score_50
+            elif sentiment_score_100 is not None:
+                sentiment_score = sentiment_score_100
+            
+            if sentiment_confidence_50 is not None and sentiment_confidence_100 is not None:
+                sentiment_confidence = (sentiment_confidence_50 + sentiment_confidence_100) / 2.0
+            elif sentiment_confidence_50 is not None:
+                sentiment_confidence = sentiment_confidence_50
+            elif sentiment_confidence_100 is not None:
+                sentiment_confidence = sentiment_confidence_100
+            
             cursor.execute(f'''
                 INSERT INTO macro_signals (
                     timestamp, exchange, fii_flow, dii_flow, fii_dii_net,
@@ -1182,8 +1218,9 @@ def save_macro_signals(exchange: str, fii_flow: float | None = None, dii_flow: f
                     banknifty_correlation, macro_spread, risk_on_score, metadata,
                     sentiment_score_50, sentiment_confidence_50, trin_50,
                     sentiment_score_100, sentiment_confidence_100, trin_100,
+                    sentiment_score, sentiment_confidence,
                     created_at
-                ) VALUES ({', '.join([ph]*20)})
+                ) VALUES ({', '.join([ph]*22)})
             ''', (
                 _coerce_iso_timestamp(timestamp),
                 exchange,
@@ -1204,6 +1241,8 @@ def save_macro_signals(exchange: str, fii_flow: float | None = None, dii_flow: f
                 sentiment_score_100,
                 sentiment_confidence_100,
                 trin_100,
+                sentiment_score,
+                sentiment_confidence,
                 _coerce_iso_timestamp(now_ist())
             ))
             conn.commit()
