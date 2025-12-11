@@ -51,12 +51,31 @@ except ImportError:  # pragma: no cover
 try:
     from stable_baselines3 import PPO, DQN
     from models.reinforcement_learning import TradingEnvironment
+    # Import gymnasium/gym for environment wrapper
+    # stable-baselines3 requires gymnasium, but we fallback to gym for compatibility
+    try:
+        import gymnasium
+        from gymnasium import Env, spaces
+        _GymEnv = Env
+        gym = gymnasium  # For compatibility with code that uses 'gym'
+    except ImportError:
+        try:
+            import gym
+            from gym import Env, spaces
+            _GymEnv = Env
+        except ImportError:
+            gym = None
+            _GymEnv = None
+            spaces = None
     SB3_AVAILABLE = True
 except ImportError:
     SB3_AVAILABLE = False
     PPO = None
     DQN = None
     TradingEnvironment = None
+    gym = None
+    _GymEnv = None
+    spaces = None
 
 
 LOGGER = logging.getLogger(__name__)
@@ -410,25 +429,29 @@ def _prepare_xy(frame: pd.DataFrame, features: Sequence[str], encode_labels: boo
     return X, y
 
 
-class GymTradingEnvironmentWrapper:
+class GymTradingEnvironmentWrapper(_GymEnv if _GymEnv else object):
     """
     Wrapper to make TradingEnvironment compatible with stable-baselines3 Gym interface.
+    Inherits from gymnasium.Env or gym.Env to be recognized by stable-baselines3.
+    Uses the same pattern as ExecutionEnvironment in reinforcement_learning.py.
     """
     def __init__(self, trading_env: TradingEnvironment):
+        if _GymEnv is None:
+            raise ImportError("gymnasium or gym must be installed for RL training")
+        
+        # Initialize base class
+        super().__init__()
+        
         self.trading_env = trading_env
         # Define action space: MultiDiscrete for signal (-1,0,1) and position_size (discretized 0-10)
         # Flattened to Discrete(33): 3 signals * 11 position levels
-        try:
-            from gymnasium import spaces
-            self.action_space = spaces.Discrete(33)  # 3 signals * 11 position levels
-            # Observation space matches TradingEnvironment state
-            state_dim = len(trading_env._get_state())
-            self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(state_dim,), dtype=np.float32)
-        except ImportError:
-            import gym
-            self.action_space = gym.spaces.Discrete(33)
-            state_dim = len(trading_env._get_state())
-            self.observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(state_dim,), dtype=np.float32)
+        self.action_space = spaces.Discrete(33)  # 3 signals * 11 position levels
+        # Observation space matches TradingEnvironment state
+        state_dim = len(trading_env._get_state())
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(state_dim,), dtype=np.float32)
+        # Set metadata for Gymnasium compatibility
+        self.metadata = {"render_modes": []}
+        self.render_mode = None
     
     def reset(self, seed=None, options=None):
         obs = self.trading_env.reset()
@@ -449,7 +472,14 @@ class GymTradingEnvironmentWrapper:
         rl_action = RLAction(signal=signal, position_size=position_size)
         
         obs, reward, done, info = self.trading_env.step(rl_action)
+        # Gymnasium format: (obs, reward, terminated, truncated, info)
+        # Gym format: (obs, reward, done, info)
+        # stable-baselines3 handles both, but prefers Gymnasium format
         return obs, reward, done, False, info
+    
+    def render(self):
+        """Render method required by Gym interface (no-op for training)."""
+        return None
 
 
 def _train_rl_segment(
