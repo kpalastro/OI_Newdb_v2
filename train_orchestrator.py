@@ -516,75 +516,129 @@ def _train_rl_segment(
     
     base_params = family.default_params()
     algorithm = family.algorithm
-    total_timesteps = base_params.pop("total_timesteps", 10000)
+    # Reduce timesteps for orchestrator (faster training)
+    total_timesteps = base_params.pop("total_timesteps", 5000)  # Reduced from 10000
     
     # Optuna tuning for RL
     tuned_params = base_params.copy()
     optuna_score = None
     
     if optuna_trials > 0 and optuna is not None:
+        LOGGER.info(f"Starting Optuna hyperparameter tuning for {family.algorithm} ({min(optuna_trials, 5)} trials)")
+        LOGGER.info(f"RL training will use {total_timesteps} timesteps per trial (reduced for speed)")
+        
         def objective(trial: "optuna.trial.Trial") -> float:
-            params = base_params.copy()
-            params.update(family.optuna_space(trial))
-            timesteps = params.pop("total_timesteps", total_timesteps)
-            
-            # Create fresh environment for each trial
-            trial_base_env = TradingEnvironment(
-                exchange=family.name,
-                features_df=train_df_with_future[feature_cols + ['future_return']],
-                initial_capital=1_000_000.0
-            )
-            trial_env = GymTradingEnvironmentWrapper(trial_base_env)
-            
-            if algorithm == "PPO":
-                model = PPO("MlpPolicy", trial_env, verbose=0, **params)
-            else:  # DQN
-                model = DQN("MlpPolicy", trial_env, verbose=0, **params)
-            
-            model.learn(total_timesteps=timesteps)
-            
-            # Evaluate on validation
-            val_df_with_future = val_df.copy()
-            if 'future_return' not in val_df_with_future.columns:
-                val_df_with_future['future_return'] = val_df_with_future['target'].astype(float) * 0.01
-            
-            val_base_env = TradingEnvironment(
-                exchange=family.name,
-                features_df=val_df_with_future[feature_cols + ['future_return']],
-                initial_capital=1_000_000.0
-            )
-            val_env = GymTradingEnvironmentWrapper(val_base_env)
-            
-            # Run evaluation episodes
-            total_reward = 0.0
-            episodes = 0
-            for _ in range(5):  # 5 evaluation episodes
-                obs, _ = val_env.reset()
-                episode_reward = 0.0
-                done = False
-                while not done:
-                    action, _ = model.predict(obs, deterministic=True)
-                    obs, reward, done, truncated, _ = val_env.step(action)
-                    episode_reward += reward
-                total_reward += episode_reward
-                episodes += 1
-            
-            return total_reward / max(episodes, 1)
+            try:
+                LOGGER.info(f"RL Optuna trial {trial.number}: Starting...")
+                params = base_params.copy()
+                params.update(family.optuna_space(trial))
+                timesteps = params.pop("total_timesteps", total_timesteps)
+                LOGGER.info(f"RL Optuna trial {trial.number}: Parameters: {params}, timesteps: {timesteps}")
+                
+                # Create fresh environment for each trial
+                trial_base_env = TradingEnvironment(
+                    exchange=family.name,
+                    features_df=train_df_with_future[feature_cols + ['future_return']],
+                    initial_capital=1_000_000.0
+                )
+                trial_env = GymTradingEnvironmentWrapper(trial_base_env)
+                
+                LOGGER.info(f"RL Optuna trial {trial.number}: Creating {algorithm} model...")
+                if algorithm == "PPO":
+                    model = PPO("MlpPolicy", trial_env, verbose=0, **params)
+                else:  # DQN
+                    model = DQN("MlpPolicy", trial_env, verbose=0, **params)
+                
+                LOGGER.info(f"RL Optuna trial {trial.number}: Training for {timesteps} timesteps (this may take a while)...")
+                import time
+                start_time = time.time()
+                model.learn(total_timesteps=timesteps)
+                elapsed = time.time() - start_time
+                LOGGER.info(f"RL Optuna trial {trial.number}: Training completed in {elapsed:.1f} seconds")
+                
+                # Evaluate on validation
+                LOGGER.info(f"RL Optuna trial {trial.number}: Starting evaluation...")
+                val_df_with_future = val_df.copy()
+                if 'future_return' not in val_df_with_future.columns:
+                    val_df_with_future['future_return'] = val_df_with_future['target'].astype(float) * 0.01
+                
+                val_base_env = TradingEnvironment(
+                    exchange=family.name,
+                    features_df=val_df_with_future[feature_cols + ['future_return']],
+                    initial_capital=1_000_000.0
+                )
+                val_env = GymTradingEnvironmentWrapper(val_base_env)
+                
+                # Run evaluation episodes
+                total_reward = 0.0
+                episodes = 0
+                max_steps_per_episode = min(len(val_df), 1000)  # Safety limit
+                
+                for episode_num in range(5):  # 5 evaluation episodes
+                    obs, _ = val_env.reset()
+                    episode_reward = 0.0
+                    done = False
+                    truncated = False
+                    steps = 0
+                    
+                    while not (done or truncated) and steps < max_steps_per_episode:
+                        action, _ = model.predict(obs, deterministic=True)
+                        obs, reward, done, truncated, _ = val_env.step(action)
+                        episode_reward += reward
+                        steps += 1
+                    
+                    if steps >= max_steps_per_episode:
+                        LOGGER.warning(f"RL Optuna trial episode {episode_num} hit step limit ({max_steps_per_episode})")
+                    
+                    total_reward += episode_reward
+                    episodes += 1
+                
+                avg_reward = total_reward / max(episodes, 1)
+                LOGGER.info(f"RL Optuna trial {trial.number}: Completed with avg reward: {avg_reward:.3f}")
+                return avg_reward
+            except Exception as e:
+                LOGGER.error(f"RL Optuna trial {trial.number} failed: {e}", exc_info=True)
+                return -1.0  # Return negative reward for failed trials
         
         study = optuna.create_study(direction='maximize')
-        study.optimize(objective, n_trials=min(optuna_trials, 5), show_progress_bar=False)  # Limit RL trials
-        tuned_params.update(study.best_params)
-        optuna_score = float(study.best_value) if study.best_value is not None else None
+        try:
+            # Timeout: 10 minutes per trial * 5 trials = 50 minutes max
+            # But we'll set a per-trial timeout of 15 minutes
+            LOGGER.info(f"Starting RL Optuna optimization with {min(optuna_trials, 5)} trials...")
+            study.optimize(objective, n_trials=min(optuna_trials, 5), show_progress_bar=False, timeout=900)  # 15 min total timeout
+            LOGGER.info("RL Optuna optimization completed")
+        except Exception as e:
+            LOGGER.error(f"RL Optuna optimization failed: {e}", exc_info=True)
+        
+        if study.best_params:
+            tuned_params.update(study.best_params)
+            optuna_score = float(study.best_value) if study.best_value is not None else None
+            LOGGER.info(f"RL Optuna best score: {optuna_score:.3f}")
+        else:
+            LOGGER.warning("RL Optuna optimization produced no results, using default params")
     
     # Train final model with tuned params
     timesteps = tuned_params.pop("total_timesteps", total_timesteps) if "total_timesteps" in tuned_params else total_timesteps
     
-    if algorithm == "PPO":
-        model = PPO("MlpPolicy", env, verbose=0, **tuned_params)
-    else:  # DQN
-        model = DQN("MlpPolicy", env, verbose=0, **tuned_params)
+    LOGGER.info(f"Training final {family.algorithm} model for {timesteps} timesteps...")
     
-    model.learn(total_timesteps=timesteps)
+    try:
+        LOGGER.info(f"Creating final {algorithm} model with params: {tuned_params}")
+        if algorithm == "PPO":
+            model = PPO("MlpPolicy", env, verbose=0, **tuned_params)
+        else:  # DQN
+            model = DQN("MlpPolicy", env, verbose=0, **tuned_params)
+        
+        import time
+        start_time = time.time()
+        LOGGER.info(f"Starting final model training (this may take several minutes)...")
+        model.learn(total_timesteps=timesteps)
+        elapsed = time.time() - start_time
+        LOGGER.info(f"Final {family.algorithm} model training complete in {elapsed:.1f} seconds")
+    except Exception as e:
+        LOGGER.error(f"RL model training failed: {e}")
+        # Return default metrics on failure
+        return {"mean_reward": 0.0, "episodes": 0, "std_reward": 0.0, "accuracy": 0.0, "f1_macro": 0.0}, tuned_params, optuna_score
     
     # Evaluate on validation
     val_df_with_future = val_df.copy()
@@ -602,20 +656,38 @@ def _train_rl_segment(
     total_reward = 0.0
     episodes = 0
     episode_rewards = []
+    max_steps_per_episode = min(len(val_df), 1000)  # Safety limit
     
-    for _ in range(10):  # 10 evaluation episodes
+    LOGGER.info(f"Starting RL evaluation: {family.algorithm} on {len(val_df)} validation samples")
+    
+    for episode_num in range(10):  # 10 evaluation episodes
         obs, _ = val_env.reset()
         episode_reward = 0.0
         done = False
+        truncated = False
         steps = 0
-        while not done and steps < len(val_df):
+        
+        while not (done or truncated) and steps < max_steps_per_episode:
             action, _ = model.predict(obs, deterministic=True)
             obs, reward, done, truncated, _ = val_env.step(action)
             episode_reward += reward
             steps += 1
+            
+            # Log progress every 100 steps
+            if steps % 100 == 0:
+                LOGGER.debug(f"RL eval episode {episode_num}: step {steps}/{max_steps_per_episode}, reward={episode_reward:.2f}")
+        
+        if steps >= max_steps_per_episode:
+            LOGGER.warning(f"RL evaluation episode {episode_num} hit step limit ({max_steps_per_episode})")
+        
         episode_rewards.append(episode_reward)
         total_reward += episode_reward
         episodes += 1
+        
+        if (episode_num + 1) % 5 == 0:
+            LOGGER.info(f"RL evaluation: completed {episode_num + 1}/10 episodes, avg reward so far: {total_reward / episodes:.3f}")
+    
+    LOGGER.info(f"RL evaluation complete: {episodes} episodes, mean reward: {total_reward / max(episodes, 1):.3f}")
     
     mean_reward = total_reward / max(episodes, 1)
     std_reward = np.std(episode_rewards) if episode_rewards else 0.0

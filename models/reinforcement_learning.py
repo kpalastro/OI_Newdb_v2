@@ -88,6 +88,11 @@ class TradingEnvironment:
         if self.done:
             return self._get_state(), 0.0, True, {}
         
+        # Check bounds before accessing dataframe
+        if self.current_step >= len(self.features_df):
+            self.done = True
+            return self._get_state(), 0.0, True, {}
+        
         # Get current price and future return
         current_row = self.features_df.iloc[self.current_step]
         # future_return = current_row.get('future_return', 0.0) # Unused var
@@ -112,6 +117,8 @@ class TradingEnvironment:
             reward = 0.0
         
         self.current_step += 1
+        # Episode ends when we've processed all available data
+        # We need to stop before accessing out-of-bounds data
         self.done = self.current_step >= len(self.features_df) - 1
         
         info = {
