@@ -80,6 +80,11 @@ except ImportError:
     spaces = None
 
 
+try:
+    import joblib
+except ImportError:
+    joblib = None
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -1020,7 +1025,164 @@ def run_orchestrator(config: OrchestratorConfig) -> Dict[str, Any]:
         json.dump(summary, handle, indent=2)
     LOGGER.info("✓ AutoML summary saved to %s", report_path)
 
+    # Save the best trained model
+    _save_best_model(config, frame, feature_cols, best_by_family, families)
+
     return summary
+
+
+def _save_best_model(
+    config: OrchestratorConfig,
+    frame: pd.DataFrame,
+    feature_cols: List[str],
+    best_by_family: Dict[str, Dict[str, Any]],
+    families: List[ModelFamily],
+):
+    """
+    Train and save the best model on all available data.
+    
+    Args:
+        config: Orchestrator configuration
+        frame: Full dataset DataFrame
+        feature_cols: List of feature column names
+        best_by_family: Dictionary with best model info per family
+        families: List of model families that were evaluated
+    """
+    if not best_by_family:
+        LOGGER.warning("No best models found, skipping model save")
+        return
+    
+    # Determine overall best family (by f1_macro or mean_reward)
+    best_family_name = None
+    best_score = -float('inf')
+    
+    for family_name, info in best_by_family.items():
+        metrics = info.get("metrics", {})
+        # RL uses mean_reward, others use f1_macro
+        if family_name.startswith("RL"):
+            score = metrics.get("mean_reward", 0.0)
+        else:
+            score = metrics.get("f1_macro", 0.0)
+        
+        if score > best_score:
+            best_score = score
+            best_family_name = family_name
+    
+    if not best_family_name:
+        LOGGER.warning("Could not determine best family, skipping model save")
+        return
+    
+    # Find the corresponding ModelFamily object
+    best_family = None
+    for family in families:
+        if family.pretty_name == best_family_name:
+            best_family = family
+            break
+    
+    if not best_family:
+        LOGGER.warning(f"Could not find ModelFamily for {best_family_name}, skipping model save")
+        return
+    
+    best_info = best_by_family[best_family_name]
+    best_params = best_info.get("params", {})
+    
+    LOGGER.info("=" * 80)
+    LOGGER.info(f"Training final production model: {best_family_name}")
+    LOGGER.info(f"Best score: {best_score:.4f}")
+    LOGGER.info(f"Best parameters: {best_params}")
+    LOGGER.info("=" * 80)
+    
+    try:
+        # Prepare data for final training (use all available data)
+        # Apply HMM regime transformation
+        hmm_transformer = RegimeHMMTransformer(n_components=4)
+        hmm_transformer.fit(frame)
+        frame_with_regime = frame.copy()
+        regimes = hmm_transformer.transform(frame).flatten()
+        frame_with_regime['regime'] = regimes
+        
+        # Include regime in features
+        feature_cols_with_regime = list(feature_cols) + (['regime'] if 'regime' not in feature_cols else [])
+        X_all, y_all = _prepare_xy(frame_with_regime, feature_cols_with_regime)
+        
+        # Encode labels for XGBoost/CatBoost
+        needs_encoding = best_family.name in ("xgboost", "catboost")
+        y_all_encoded = _encode_labels(y_all) if needs_encoding else y_all
+        
+        # Train final model
+        if best_family.name == "rl":
+            # For RL models, save the model object if available
+            # Note: RL models are typically saved by train_rl.py, but we can save parameters
+            LOGGER.info("RL models are saved separately. Saving parameters to summary only.")
+            # RL models are complex and require the environment, so we skip direct saving here
+            # The parameters are already in the summary JSON
+        else:
+            # Train tree-based model on all data
+            final_model = best_family.build_model(best_params)
+            final_model.fit(X_all, y_all_encoded)
+            
+            # Save model artifacts
+            model_dir = Path("models") / config.exchange
+            model_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Save the trained model
+            try:
+                import joblib
+            except ImportError:
+                LOGGER.warning("joblib not available, cannot save model")
+                return
+            
+            # Save model with family-specific filename
+            model_filename_map = {
+                "lightgbm": "lightgbm_classifier.pkl",
+                "xgboost": "xgboost_classifier.pkl",
+                "catboost": "catboost_classifier.pkl",
+            }
+            model_filename = model_filename_map.get(best_family.name, f"{best_family.name}_classifier.pkl")
+            model_path = model_dir / model_filename
+            joblib.dump(final_model, model_path)
+            LOGGER.info(f"✓ Saved {best_family_name} model to {model_path}")
+            
+            # Save feature columns
+            feature_path = model_dir / "model_features.pkl"
+            joblib.dump(feature_cols_with_regime, feature_path)
+            LOGGER.info(f"✓ Saved feature columns to {feature_path}")
+            
+            # Save HMM transformer for regime detection
+            hmm_path = model_dir / "hmm_regime_model.pkl"
+            joblib.dump(hmm_transformer.model, hmm_path)
+            LOGGER.info(f"✓ Saved HMM regime model to {hmm_path}")
+            
+            # Save swing_ensemble.pkl for multi_horizon_ensemble.py compatibility
+            swing_ensemble_data = {
+                'models': {best_family.name: final_model},
+                'weights': {best_family.name: 1.0},
+                '_is_fitted': True
+            }
+            swing_path = model_dir / "swing_ensemble.pkl"
+            joblib.dump(swing_ensemble_data, swing_path)
+            LOGGER.info(f"✓ Saved swing_ensemble.pkl for multi-horizon ensemble compatibility")
+            
+            # Save training metadata
+            metadata = {
+                "exchange": config.exchange,
+                "model_family": best_family_name,
+                "best_score": best_score,
+                "best_params": best_params,
+                "training_date": now_ist().isoformat(),
+                "feature_count": len(feature_cols_with_regime),
+                "total_samples": len(X_all),
+            }
+            metadata_path = model_dir / "training_metadata.json"
+            with open(metadata_path, "w") as f:
+                json.dump(metadata, f, indent=2)
+            LOGGER.info(f"✓ Saved training metadata to {metadata_path}")
+            
+            LOGGER.info(f"✓ All model artifacts saved to {model_dir}")
+        
+    except Exception as e:
+        LOGGER.error(f"Error saving best model: {e}", exc_info=True)
+        LOGGER.warning("Walk-forward evaluation completed, but model save failed")
 
 
 def parse_args() -> OrchestratorConfig:
