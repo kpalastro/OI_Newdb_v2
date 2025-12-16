@@ -20,9 +20,14 @@ from scipy.stats import skew
 
 from time_utils import to_ist, now_ist
 from sentiment_analyzer import SentimentAnalyzer
+import logging
 
 # Global Sentiment Analyzer instance (lazy initialization or reused)
 _SENTIMENT_ANALYZER = None
+
+# NSE Option Chain Cache (module-level)
+_nse_option_chain_cache: Dict[float, Tuple[Dict, datetime]] = {}
+_cache_timeout_seconds = 30  # Cache for 30 seconds
 
 def get_sentiment_analyzer():
     global _SENTIMENT_ANALYZER
@@ -97,6 +102,15 @@ REQUIRED_FEATURE_COLUMNS = [
     'sentiment_fii_net_crores',
     'sentiment_dii_net_crores',
     'sentiment_inst_net_crores',
+    'oi_next_sentiment',  # NSE Option Chain Sentiment
+    # NSE Option Chain Features
+    'nse_next_oi_call_total',
+    'nse_next_oi_put_total',
+    'nse_next_oi_change_call_total',
+    'nse_next_oi_change_put_total',
+    'nse_next_volume_call_total',
+    'nse_next_volume_put_total',
+    'nse_next_oi_change_diff_put_call',
     # Volume Acceleration Features (Momentum Exhaustion Detection)
     'volume_velocity',
     'volume_acceleration',
@@ -154,6 +168,194 @@ def _calculate_depth_metrics(call_options: List[Dict], put_options: List[Dict]) 
     total = max(buy_total + sell_total, 1e-6)
     imbalance = (buy_total - sell_total) / total
     return buy_total, sell_total, imbalance
+
+
+def _calculate_nearest_atm_strike(open_price: float, strike_difference: int) -> float:
+    """
+    Calculate the nearest ATM strike price based on open price.
+    
+    Args:
+        open_price: Market open price of the underlying
+        strike_difference: Strike difference from config (e.g., 50 for NIFTY, 100 for BANKNIFTY)
+    
+    Returns:
+        Nearest ATM strike price rounded to nearest strike_difference
+    """
+    # Round to nearest strike_difference
+    nearest_strike = round(open_price / strike_difference) * strike_difference
+    return nearest_strike
+
+
+def _get_cached_nse_data(strike: float) -> Optional[Dict]:
+    """Get cached NSE option chain data if available and fresh."""
+    global _nse_option_chain_cache
+    
+    if strike in _nse_option_chain_cache:
+        data, cached_time = _nse_option_chain_cache[strike]
+        if datetime.now() - cached_time < timedelta(seconds=_cache_timeout_seconds):
+            return data
+    
+    return None
+
+
+def _cache_nse_data(strike: float, data: Dict):
+    """Cache NSE option chain data with timestamp."""
+    global _nse_option_chain_cache
+    _nse_option_chain_cache[strike] = (data, datetime.now())
+
+
+def _fetch_nse_option_chain_data(strike: float) -> Optional[Dict]:
+    """
+    Fetch option chain data from NSE API for a given strike price.
+    
+    Args:
+        strike: Strike price to fetch data for (e.g., 25950.00)
+    
+    Returns:
+        Dictionary containing option chain data or None if fetch fails
+    """
+    try:
+        import requests
+        from time import sleep
+        
+        # Format strike with comma as thousand separator
+        url = f"https://www.nseindia.com/api/option-chain-v3?type=Indices&symbol=NIFTY&strike={strike:,.2f}"
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.nseindia.com/option-chain",
+            "X-Requested-With": "XMLHttpRequest"
+        }
+        
+        # First, establish a session by visiting the main page
+        session = requests.Session()
+        session.get("https://www.nseindia.com/option-chain", headers=headers, timeout=10)
+        sleep(0.5)  # Small delay to avoid rate limiting
+        
+        # Now fetch the option chain data
+        response = session.get(url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            logging.warning(f"NSE API returned status {response.status_code} for strike {strike}")
+            return None
+    except Exception as e:
+        logging.error(f"Error fetching NSE option chain data for strike {strike}: {e}")
+        return None
+
+
+def _parse_nse_option_chain_data(option_chain_data: Dict) -> Dict[str, float]:
+    """
+    Parse NSE option chain JSON response and aggregate OI, Change in OI, and Volume.
+    
+    Args:
+        option_chain_data: Raw JSON response from NSE API
+    
+    Returns:
+        Dictionary with aggregated metrics:
+        - total_oi_call
+        - total_oi_put
+        - total_oi_change_call
+        - total_oi_change_put
+        - total_volume_call
+        - total_volume_put
+        - oi_change_diff_put_call
+    """
+    try:
+        # Navigate through the JSON structure
+        # Based on typical NSE API response structure:
+        # data['records']['data'] contains array of strike data
+        records = option_chain_data.get('records', {})
+        data = records.get('data', [])
+        
+        total_oi_call = 0.0
+        total_oi_put = 0.0
+        total_oi_change_call = 0.0
+        total_oi_change_put = 0.0
+        total_volume_call = 0.0
+        total_volume_put = 0.0
+        
+        for strike_data in data:
+            # Extract CALL option data
+            ce_data = strike_data.get('CE', {})
+            if ce_data:
+                total_oi_call += float(ce_data.get('openInterest', 0) or 0)
+                total_oi_change_call += float(ce_data.get('changeinOpenInterest', 0) or 0)
+                total_volume_call += float(ce_data.get('totalTradedVolume', 0) or 0)
+            
+            # Extract PUT option data
+            pe_data = strike_data.get('PE', {})
+            if pe_data:
+                total_oi_put += float(pe_data.get('openInterest', 0) or 0)
+                total_oi_change_put += float(pe_data.get('changeinOpenInterest', 0) or 0)
+                total_volume_put += float(pe_data.get('totalTradedVolume', 0) or 0)
+        
+        # Calculate difference: PUT - CALL
+        oi_change_diff_put_call = total_oi_change_put - total_oi_change_call
+        
+        return {
+            'total_oi_call': total_oi_call,
+            'total_oi_put': total_oi_put,
+            'total_oi_change_call': total_oi_change_call,
+            'total_oi_change_put': total_oi_change_put,
+            'total_volume_call': total_volume_call,
+            'total_volume_put': total_volume_put,
+            'oi_change_diff_put_call': oi_change_diff_put_call
+        }
+    except Exception as e:
+        logging.error(f"Error parsing NSE option chain data: {e}", exc_info=True)
+        # Return zeros if parsing fails
+        return {
+            'total_oi_call': 0.0,
+            'total_oi_put': 0.0,
+            'total_oi_change_call': 0.0,
+            'total_oi_change_put': 0.0,
+            'total_volume_call': 0.0,
+            'total_volume_put': 0.0,
+            'oi_change_diff_put_call': 0.0
+        }
+
+
+def _get_market_open_price(handler) -> Optional[float]:
+    """
+    Get the market open price from handler's data reels.
+    
+    Args:
+        handler: ExchangeDataHandler instance
+    
+    Returns:
+        Open price for the current trading session or None if not available
+    """
+    try:
+        if handler.underlying_token is None:
+            return None
+        
+        # Get the first bar of the current session from data reels
+        data_reel = handler.data_reels.get(handler.underlying_token)
+        if not data_reel or len(data_reel) == 0:
+            return None
+        
+        # The first entry in the reel should have the open price
+        # Or we can get it from the first minute bar
+        first_bar = data_reel[0] if len(data_reel) > 0 else None
+        
+        if first_bar:
+            # Check if it has open_price field
+            if 'open_price' in first_bar:
+                return float(first_bar['open_price'])
+            # Fallback: use the first LTP as open price
+            elif 'ltp' in first_bar:
+                return float(first_bar['ltp'])
+        
+        # Alternative: Get from latest_oi_data if available
+        # (though this might be current price, not open)
+        return None
+    except Exception as e:
+        logging.error(f"Error getting market open price: {e}")
+        return None
 
 
 def engineer_live_feature_set(
@@ -397,6 +599,76 @@ def engineer_live_feature_set(
 
     # 4. Net Flow Direction: +ve = bear pressure (CE adds / PE leaves), -ve = bull pressure
     features['itm_oi_flow_direction'] = itm_ce_change - itm_pe_change
+
+    # NSE Option Chain Features (based on ATM strike from open price)
+    try:
+        # Get market open price
+        open_price = _get_market_open_price(handler)
+        
+        if open_price is not None:
+            # Calculate nearest ATM strike
+            strike_difference = handler.config.get('strike_difference', 50)
+            atm_strike = _calculate_nearest_atm_strike(open_price, strike_difference)
+            
+            # Fetch NSE option chain data (with caching)
+            option_chain_data = _get_cached_nse_data(atm_strike)
+            if option_chain_data is None:
+                option_chain_data = _fetch_nse_option_chain_data(atm_strike)
+                if option_chain_data:
+                    _cache_nse_data(atm_strike, option_chain_data)
+            
+            if option_chain_data:
+                # Parse and aggregate the data
+                nse_metrics = _parse_nse_option_chain_data(option_chain_data)
+                
+                # Add to features with prefix 'nse_next_'
+                features['nse_next_oi_call_total'] = nse_metrics['total_oi_call']
+                features['nse_next_oi_put_total'] = nse_metrics['total_oi_put']
+                features['nse_next_oi_change_call_total'] = nse_metrics['total_oi_change_call']
+                features['nse_next_oi_change_put_total'] = nse_metrics['total_oi_change_put']
+                features['nse_next_volume_call_total'] = nse_metrics['total_volume_call']
+                features['nse_next_volume_put_total'] = nse_metrics['total_volume_put']
+                features['nse_next_oi_change_diff_put_call'] = nse_metrics['oi_change_diff_put_call']
+                
+                # Add sentiment feature (same value as the difference) - placed in Sentiment section
+                features['oi_next_sentiment'] = nse_metrics['oi_change_diff_put_call']
+            else:
+                # Set to zero if fetch failed
+                features.update({
+                    'nse_next_oi_call_total': 0.0,
+                    'nse_next_oi_put_total': 0.0,
+                    'nse_next_oi_change_call_total': 0.0,
+                    'nse_next_oi_change_put_total': 0.0,
+                    'nse_next_volume_call_total': 0.0,
+                    'nse_next_volume_put_total': 0.0,
+                    'nse_next_oi_change_diff_put_call': 0.0,
+                    'oi_next_sentiment': 0.0
+                })
+        else:
+            # Set to zero if open price not available
+            features.update({
+                'nse_next_oi_call_total': 0.0,
+                'nse_next_oi_put_total': 0.0,
+                'nse_next_oi_change_call_total': 0.0,
+                'nse_next_oi_change_put_total': 0.0,
+                'nse_next_volume_call_total': 0.0,
+                'nse_next_volume_put_total': 0.0,
+                'nse_next_oi_change_diff_put_call': 0.0,
+                'oi_next_sentiment': 0.0
+            })
+    except Exception as e:
+        logging.error(f"Error calculating NSE option chain features: {e}", exc_info=True)
+        # Set to zero on error
+        features.update({
+            'nse_next_oi_call_total': 0.0,
+            'nse_next_oi_put_total': 0.0,
+            'nse_next_oi_change_call_total': 0.0,
+            'nse_next_oi_change_put_total': 0.0,
+            'nse_next_volume_call_total': 0.0,
+            'nse_next_volume_put_total': 0.0,
+            'nse_next_oi_change_diff_put_call': 0.0,
+            'oi_next_sentiment': 0.0
+        })
 
     # Final sanitation + ensure no NaNs
     sanitized = {k: _sanitize_float(v) for k, v in features.items()}

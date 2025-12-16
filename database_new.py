@@ -533,7 +533,16 @@ def migrate_database():
                 ('sentiment_score_50', 'DOUBLE PRECISION'),
                 ('sentiment_score_100', 'DOUBLE PRECISION'),
                 ('trin_50', 'DOUBLE PRECISION'),
-                ('trin_100', 'DOUBLE PRECISION')
+                ('trin_100', 'DOUBLE PRECISION'),
+                # NSE Option Chain Features
+                ('oi_next_sentiment', 'DOUBLE PRECISION'),
+                ('nse_next_oi_call_total', 'DOUBLE PRECISION'),
+                ('nse_next_oi_put_total', 'DOUBLE PRECISION'),
+                ('nse_next_oi_change_call_total', 'DOUBLE PRECISION'),
+                ('nse_next_oi_change_put_total', 'DOUBLE PRECISION'),
+                ('nse_next_volume_call_total', 'DOUBLE PRECISION'),
+                ('nse_next_volume_put_total', 'DOUBLE PRECISION'),
+                ('nse_next_oi_change_diff_put_call', 'DOUBLE PRECISION')
             ]
             for col, col_type in ml_feature_cols:
                 if col not in ml_cols:
@@ -752,6 +761,15 @@ def save_option_chain_snapshot(exchange, call_options, put_options, underlying_p
                     ml_features_dict.get('macro_sentiment_score_100'),
                     ml_features_dict.get('macro_trin_50'),
                     ml_features_dict.get('macro_trin_100'),
+                    # NSE Option Chain Features
+                    ml_features_dict.get('oi_next_sentiment'),
+                    ml_features_dict.get('nse_next_oi_call_total'),
+                    ml_features_dict.get('nse_next_oi_put_total'),
+                    ml_features_dict.get('nse_next_oi_change_call_total'),
+                    ml_features_dict.get('nse_next_oi_change_put_total'),
+                    ml_features_dict.get('nse_next_volume_call_total'),
+                    ml_features_dict.get('nse_next_volume_put_total'),
+                    ml_features_dict.get('nse_next_oi_change_diff_put_call'),
                 ]
                 # Apply sanitization (converts np.float/int to python float/int)
                 sanitized_vals = [_sanitize_feature_value(v) for v in raw_vals]
@@ -775,6 +793,11 @@ def save_option_chain_snapshot(exchange, call_options, put_options, underlying_p
                         "gamma_flip_level", "ce_volume_to_oi_ratio", "pe_volume_to_oi_ratio",
                         "news_sentiment_score",
                         "sentiment_score_50", "sentiment_score_100", "trin_50", "trin_100",
+                        "oi_next_sentiment",
+                        "nse_next_oi_call_total", "nse_next_oi_put_total",
+                        "nse_next_oi_change_call_total", "nse_next_oi_change_put_total",
+                        "nse_next_volume_call_total", "nse_next_volume_put_total",
+                        "nse_next_oi_change_diff_put_call",
                         "created_at", "feature_payload"
                     ]
                     placeholders_str = ', '.join([ph] * len(cols))
@@ -799,8 +822,13 @@ def save_option_chain_snapshot(exchange, call_options, put_options, underlying_p
                          net_gamma_exposure, gamma_flip_level, ce_volume_to_oi_ratio, pe_volume_to_oi_ratio,
                          news_sentiment_score,
                          sentiment_score_50, sentiment_score_100, trin_50, trin_100,
+                         oi_next_sentiment,
+                         nse_next_oi_call_total, nse_next_oi_put_total,
+                         nse_next_oi_change_call_total, nse_next_oi_change_put_total,
+                         nse_next_volume_call_total, nse_next_volume_put_total,
+                         nse_next_oi_change_diff_put_call,
                          created_at, feature_payload)
-                        VALUES ({', '.join([ph]*32)})
+                        VALUES ({', '.join([ph]*40)})
                     ''', ml_record)
             
             # Update metadata
