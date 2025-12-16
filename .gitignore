@@ -25,6 +25,9 @@ build/
 dist/
 metrics/phase_1/
 metrics/phase_2/
+metrics/phase2_metrics/
+metrics/rl_contribution_report.json
+state/reels_snapshot.pkl
 metrics/phase_3/
 metrics/phase_4/
 metrics/phase_5/
