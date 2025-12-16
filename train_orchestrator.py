@@ -14,6 +14,8 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import signal
+import sys
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -495,66 +497,136 @@ def _train_rl_segment(
     Returns:
         Tuple of (metrics, params, optuna_score)
     """
+    LOGGER.info(f"Entering _train_rl_segment for {family.algorithm}")
+    
     if not SB3_AVAILABLE or TradingEnvironment is None:
-        return {"mean_reward": 0.0, "episodes": 0}, {}, None
+        LOGGER.warning("Stable Baselines3 or TradingEnvironment not available, skipping RL training")
+        return {"mean_reward": 0.0, "episodes": 0, "std_reward": 0.0, "accuracy": 0.0, "f1_macro": 0.0}, {}, None
+    
+    LOGGER.info(f"Preparing data for RL training: train={len(train_df)}, val={len(val_df)}, features={len(feature_cols)}")
+    
+    # Skip RL training if data is too small (RL needs more data and is very slow)
+    # With window-days=4, datasets are typically too small for effective RL training
+    if len(train_df) < 500:
+        LOGGER.warning(
+            f"Insufficient training data for RL ({len(train_df)} rows). "
+            f"RL needs at least 500 rows for effective training. "
+            f"With window-days=4, consider using window-days>=30 for RL training. "
+            f"Skipping RL training for this segment."
+        )
+        return {"mean_reward": 0.0, "episodes": 0, "std_reward": 0.0, "accuracy": 0.0, "f1_macro": 0.0}, {}, None
+    
+    if len(val_df) < 50:
+        LOGGER.warning(
+            f"Insufficient validation data for RL ({len(val_df)} rows). "
+            f"RL needs at least 50 rows. Skipping RL training for this segment."
+        )
+        return {"mean_reward": 0.0, "episodes": 0, "std_reward": 0.0, "accuracy": 0.0, "f1_macro": 0.0}, {}, None
     
     # Prepare training data with future returns for reward calculation
     train_df_with_future = train_df.copy()
     if 'future_return' not in train_df_with_future.columns:
         # Calculate future return from target (simplified)
         train_df_with_future['future_return'] = train_df_with_future['target'].astype(float) * 0.01
+        LOGGER.info("Calculated future_return from target column")
     
+    LOGGER.info(f"Creating TradingEnvironment with {len(train_df_with_future)} rows...")
     # Create base environment
-    base_env = TradingEnvironment(
-        exchange=family.name,
-        features_df=train_df_with_future[feature_cols + ['future_return']],
-        initial_capital=1_000_000.0
-    )
+    try:
+        base_env = TradingEnvironment(
+            exchange=family.name,
+            features_df=train_df_with_future[feature_cols + ['future_return']],
+            initial_capital=1_000_000.0
+        )
+        LOGGER.info("TradingEnvironment created successfully")
+    except Exception as e:
+        LOGGER.error(f"Failed to create TradingEnvironment: {e}", exc_info=True)
+        return {"mean_reward": 0.0, "episodes": 0, "std_reward": 0.0, "accuracy": 0.0, "f1_macro": 0.0}, {}, None
     
     # Wrap for Gym compatibility
-    env = GymTradingEnvironmentWrapper(base_env)
+    LOGGER.info("Wrapping environment for Gym compatibility...")
+    try:
+        env = GymTradingEnvironmentWrapper(base_env)
+        LOGGER.info("Environment wrapped successfully")
+    except Exception as e:
+        LOGGER.error(f"Failed to wrap environment: {e}", exc_info=True)
+        return {"mean_reward": 0.0, "episodes": 0, "std_reward": 0.0, "accuracy": 0.0, "f1_macro": 0.0}, {}, None
     
     base_params = family.default_params()
     algorithm = family.algorithm
+    LOGGER.info(f"RL algorithm: {algorithm}, base_params: {base_params}")
+    
     # Reduce timesteps for orchestrator (faster training)
     total_timesteps = base_params.pop("total_timesteps", 5000)  # Reduced from 10000
+    LOGGER.info(f"Using {total_timesteps} timesteps for RL training")
     
     # Optuna tuning for RL
     tuned_params = base_params.copy()
     optuna_score = None
     
     if optuna_trials > 0 and optuna is not None:
+        LOGGER.info("=" * 80)
         LOGGER.info(f"Starting Optuna hyperparameter tuning for {family.algorithm} ({min(optuna_trials, 5)} trials)")
         LOGGER.info(f"RL training will use {total_timesteps} timesteps per trial (reduced for speed)")
+        LOGGER.info("=" * 80)
+        
+        # Flush logs
+        import sys
+        sys.stdout.flush()
+        sys.stderr.flush()
         
         def objective(trial: "optuna.trial.Trial") -> float:
             try:
+                LOGGER.info("=" * 80)
                 LOGGER.info(f"RL Optuna trial {trial.number}: Starting...")
+                LOGGER.info("=" * 80)
+                sys.stdout.flush()
+                sys.stderr.flush()
+                
                 params = base_params.copy()
                 params.update(family.optuna_space(trial))
                 timesteps = params.pop("total_timesteps", total_timesteps)
                 LOGGER.info(f"RL Optuna trial {trial.number}: Parameters: {params}, timesteps: {timesteps}")
+                sys.stdout.flush()
                 
                 # Create fresh environment for each trial
+                LOGGER.info(f"RL Optuna trial {trial.number}: Creating environment...")
+                sys.stdout.flush()
                 trial_base_env = TradingEnvironment(
                     exchange=family.name,
                     features_df=train_df_with_future[feature_cols + ['future_return']],
                     initial_capital=1_000_000.0
                 )
                 trial_env = GymTradingEnvironmentWrapper(trial_base_env)
+                LOGGER.info(f"RL Optuna trial {trial.number}: Environment created")
+                sys.stdout.flush()
                 
                 LOGGER.info(f"RL Optuna trial {trial.number}: Creating {algorithm} model...")
-                if algorithm == "PPO":
-                    model = PPO("MlpPolicy", trial_env, verbose=0, **params)
-                else:  # DQN
-                    model = DQN("MlpPolicy", trial_env, verbose=0, **params)
+                sys.stdout.flush()
                 
-                LOGGER.info(f"RL Optuna trial {trial.number}: Training for {timesteps} timesteps (this may take a while)...")
+                if algorithm == "PPO":
+                    model = PPO("MlpPolicy", trial_env, verbose=1, **params)  # verbose=1 to see progress
+                else:  # DQN
+                    model = DQN("MlpPolicy", trial_env, verbose=1, **params)  # verbose=1 to see progress
+                
+                LOGGER.info(f"RL Optuna trial {trial.number}: Model created. Starting training for {timesteps} timesteps...")
+                LOGGER.info(f"RL Optuna trial {trial.number}: This may take 1-5 minutes. Please wait...")
+                sys.stdout.flush()
+                sys.stderr.flush()
+                
                 import time
                 start_time = time.time()
-                model.learn(total_timesteps=timesteps)
+                
+                # Add progress callback or periodic logging
+                try:
+                    model.learn(total_timesteps=timesteps, progress_bar=True)
+                except Exception as e:
+                    LOGGER.error(f"RL Optuna trial {trial.number}: model.learn() failed: {e}", exc_info=True)
+                    raise
+                
                 elapsed = time.time() - start_time
                 LOGGER.info(f"RL Optuna trial {trial.number}: Training completed in {elapsed:.1f} seconds")
+                sys.stdout.flush()
                 
                 # Evaluate on validation
                 LOGGER.info(f"RL Optuna trial {trial.number}: Starting evaluation...")
@@ -605,8 +677,19 @@ def _train_rl_segment(
             # Timeout: 10 minutes per trial * 5 trials = 50 minutes max
             # But we'll set a per-trial timeout of 15 minutes
             LOGGER.info(f"Starting RL Optuna optimization with {min(optuna_trials, 5)} trials...")
-            study.optimize(objective, n_trials=min(optuna_trials, 5), show_progress_bar=False, timeout=900)  # 15 min total timeout
+            LOGGER.info("NOTE: RL training can be slow. Each trial may take 1-5 minutes.")
+            
+            # Use a shorter timeout for faster feedback
+            study.optimize(
+                objective, 
+                n_trials=min(optuna_trials, 5), 
+                show_progress_bar=False, 
+                timeout=600  # 10 min total timeout (reduced from 15)
+            )
             LOGGER.info("RL Optuna optimization completed")
+        except KeyboardInterrupt:
+            LOGGER.warning("RL Optuna optimization interrupted by user")
+            raise
         except Exception as e:
             LOGGER.error(f"RL Optuna optimization failed: {e}", exc_info=True)
         
@@ -814,9 +897,35 @@ def run_orchestrator(config: OrchestratorConfig) -> Dict[str, Any]:
         for family in families:
             if family.name == "rl":
                 # RL training is different - uses environment
-                metrics, tuned_params, optuna_score = _train_rl_segment(
-                    family, train_df, val_df, feature_cols_with_regime, config.optuna_trials
+                LOGGER.info("=" * 80)
+                LOGGER.info(
+                    "Segment %s | %s | Starting RL training (train=%d, val=%d samples)...",
+                    segment.segment_id, family.pretty_name, len(train_df), len(val_df)
                 )
+                LOGGER.info("=" * 80)
+                
+                # Flush logs to ensure they're visible
+                import sys
+                sys.stdout.flush()
+                sys.stderr.flush()
+                
+                try:
+                    metrics, tuned_params, optuna_score = _train_rl_segment(
+                        family, train_df, val_df, feature_cols_with_regime, config.optuna_trials
+                    )
+                    LOGGER.info(
+                        "Segment %s | %s | RL training completed: reward=%.3f",
+                        segment.segment_id, family.pretty_name, metrics.get("mean_reward", 0.0)
+                    )
+                except KeyboardInterrupt:
+                    LOGGER.warning(f"Segment {segment.segment_id} | {family.pretty_name} | RL training interrupted by user")
+                    raise
+                except Exception as e:
+                    LOGGER.error(f"Segment {segment.segment_id} | {family.pretty_name} | RL training failed: {e}", exc_info=True)
+                    # Return default metrics on failure
+                    metrics = {"mean_reward": 0.0, "episodes": 0, "std_reward": 0.0, "accuracy": 0.0, "f1_macro": 0.0}
+                    tuned_params = {}
+                    optuna_score = None
                 sample_counts = {"train": len(train_df), "validation": len(val_df)}
                 result = SegmentResult(segment, family.pretty_name, metrics, tuned_params, optuna_score, sample_counts)
                 results.append(result)
