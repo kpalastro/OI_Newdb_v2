@@ -85,6 +85,14 @@ try:
 except ImportError:
     joblib = None
 
+# Check if progress bar dependencies are available for RL training
+try:
+    import tqdm
+    import rich
+    PROGRESS_BAR_AVAILABLE = True
+except ImportError:
+    PROGRESS_BAR_AVAILABLE = False
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -623,8 +631,12 @@ def _train_rl_segment(
                 start_time = time.time()
                 
                 # Add progress callback or periodic logging
+                # Only use progress_bar if dependencies are available
                 try:
-                    model.learn(total_timesteps=timesteps, progress_bar=True)
+                    if PROGRESS_BAR_AVAILABLE:
+                        model.learn(total_timesteps=timesteps, progress_bar=True)
+                    else:
+                        model.learn(total_timesteps=timesteps, progress_bar=False)
                 except Exception as e:
                     LOGGER.error(f"RL Optuna trial {trial.number}: model.learn() failed: {e}", exc_info=True)
                     raise
@@ -1026,7 +1038,14 @@ def run_orchestrator(config: OrchestratorConfig) -> Dict[str, Any]:
     LOGGER.info("✓ AutoML summary saved to %s", report_path)
 
     # Save the best trained model
-    _save_best_model(config, frame, feature_cols, best_by_family, families)
+    LOGGER.info("=" * 80)
+    LOGGER.info("Initiating model save process after walk-forward evaluation...")
+    LOGGER.info("=" * 80)
+    try:
+        _save_best_model(config, frame, feature_cols, best_by_family, families)
+    except Exception as e:
+        LOGGER.error(f"CRITICAL: Model save process failed with exception: {e}", exc_info=True)
+        LOGGER.warning("Walk-forward evaluation completed, but model save failed. Check logs above for details.")
 
     return summary
 
@@ -1048,8 +1067,13 @@ def _save_best_model(
         best_by_family: Dictionary with best model info per family
         families: List of model families that were evaluated
     """
+    LOGGER.info("=" * 80)
+    LOGGER.info("Starting model save process...")
+    LOGGER.info(f"best_by_family keys: {list(best_by_family.keys())}")
+    LOGGER.info(f"Available families: {[f.pretty_name for f in families]}")
+    
     if not best_by_family:
-        LOGGER.warning("No best models found, skipping model save")
+        LOGGER.warning("No best models found in best_by_family, skipping model save")
         return
     
     # Determine overall best family (by f1_macro or mean_reward)
@@ -1059,10 +1083,12 @@ def _save_best_model(
     for family_name, info in best_by_family.items():
         metrics = info.get("metrics", {})
         # RL uses mean_reward, others use f1_macro
-        if family_name.startswith("RL"):
+        if family_name.startswith("RL") or "RL" in family_name:
             score = metrics.get("mean_reward", 0.0)
+            LOGGER.debug(f"Family {family_name}: score={score} (mean_reward)")
         else:
             score = metrics.get("f1_macro", 0.0)
+            LOGGER.debug(f"Family {family_name}: score={score} (f1_macro)")
         
         if score > best_score:
             best_score = score
@@ -1070,7 +1096,10 @@ def _save_best_model(
     
     if not best_family_name:
         LOGGER.warning("Could not determine best family, skipping model save")
+        LOGGER.warning(f"best_by_family contents: {best_by_family}")
         return
+    
+    LOGGER.info(f"Selected best family: {best_family_name} with score: {best_score:.4f}")
     
     # Find the corresponding ModelFamily object
     best_family = None
@@ -1090,9 +1119,14 @@ def _save_best_model(
     LOGGER.info(f"Training final production model: {best_family_name}")
     LOGGER.info(f"Best score: {best_score:.4f}")
     LOGGER.info(f"Best parameters: {best_params}")
+    LOGGER.info(f"Dataframe shape: {frame.shape}")
+    LOGGER.info(f"Feature columns count: {len(feature_cols)}")
     LOGGER.info("=" * 80)
     
     try:
+        if frame.empty:
+            LOGGER.error("Dataframe is empty, cannot train final model")
+            return
         # Prepare data for final training (use all available data)
         # Apply HMM regime transformation
         hmm_transformer = RegimeHMMTransformer(n_components=4)
@@ -1103,7 +1137,19 @@ def _save_best_model(
         
         # Include regime in features
         feature_cols_with_regime = list(feature_cols) + (['regime'] if 'regime' not in feature_cols else [])
+        
+        # Verify we have data
+        if len(frame_with_regime) == 0:
+            LOGGER.error("No data available after regime transformation")
+            return
+        
         X_all, y_all = _prepare_xy(frame_with_regime, feature_cols_with_regime)
+        
+        if len(X_all) == 0 or len(y_all) == 0:
+            LOGGER.error(f"No training data available (X_all={len(X_all)}, y_all={len(y_all)})")
+            return
+        
+        LOGGER.info(f"Prepared training data: X shape={X_all.shape}, y shape={y_all.shape}")
         
         # Encode labels for XGBoost/CatBoost
         needs_encoding = best_family.name in ("xgboost", "catboost")
@@ -1113,10 +1159,11 @@ def _save_best_model(
         if best_family.name == "rl":
             # For RL models, save the model object if available
             # Note: RL models are typically saved by train_rl.py, but we can save parameters
-            LOGGER.info("RL models are saved separately. Saving parameters to summary only.")
-            # RL models are complex and require the environment, so we skip direct saving here
-            # The parameters are already in the summary JSON
+            LOGGER.warning("RL models are saved separately by train_rl.py. Cannot save RL model here.")
+            LOGGER.info("RL model parameters are saved in the auto_ml_summary.json report.")
+            return
         else:
+            LOGGER.info(f"Training {best_family_name} model on all {len(X_all)} samples...")
             # Train tree-based model on all data
             final_model = best_family.build_model(best_params)
             final_model.fit(X_all, y_all_encoded)
@@ -1124,12 +1171,12 @@ def _save_best_model(
             # Save model artifacts
             model_dir = Path("models") / config.exchange
             model_dir.mkdir(parents=True, exist_ok=True)
+            LOGGER.info(f"Model directory: {model_dir.absolute()}")
             
             # Save the trained model
-            try:
-                import joblib
-            except ImportError:
-                LOGGER.warning("joblib not available, cannot save model")
+            if joblib is None:
+                LOGGER.error("joblib not available, cannot save model")
+                LOGGER.error("Please install joblib: pip install joblib")
                 return
             
             # Save model with family-specific filename
@@ -1140,18 +1187,36 @@ def _save_best_model(
             }
             model_filename = model_filename_map.get(best_family.name, f"{best_family.name}_classifier.pkl")
             model_path = model_dir / model_filename
-            joblib.dump(final_model, model_path)
-            LOGGER.info(f"✓ Saved {best_family_name} model to {model_path}")
+            
+            # Save the trained model
+            try:
+                joblib.dump(final_model, model_path)
+                if model_path.exists():
+                    file_size = model_path.stat().st_size / 1024  # KB
+                    LOGGER.info(f"✓ Saved {best_family_name} model to {model_path} ({file_size:.1f} KB)")
+                else:
+                    LOGGER.error(f"✗ Model file was not created: {model_path}")
+            except Exception as e:
+                LOGGER.error(f"✗ Failed to save model to {model_path}: {e}", exc_info=True)
+                raise
             
             # Save feature columns
             feature_path = model_dir / "model_features.pkl"
-            joblib.dump(feature_cols_with_regime, feature_path)
-            LOGGER.info(f"✓ Saved feature columns to {feature_path}")
+            try:
+                joblib.dump(feature_cols_with_regime, feature_path)
+                LOGGER.info(f"✓ Saved feature columns to {feature_path}")
+            except Exception as e:
+                LOGGER.error(f"✗ Failed to save feature columns: {e}", exc_info=True)
+                raise
             
             # Save HMM transformer for regime detection
             hmm_path = model_dir / "hmm_regime_model.pkl"
-            joblib.dump(hmm_transformer.model, hmm_path)
-            LOGGER.info(f"✓ Saved HMM regime model to {hmm_path}")
+            try:
+                joblib.dump(hmm_transformer.model, hmm_path)
+                LOGGER.info(f"✓ Saved HMM regime model to {hmm_path}")
+            except Exception as e:
+                LOGGER.error(f"✗ Failed to save HMM model: {e}", exc_info=True)
+                raise
             
             # Save swing_ensemble.pkl for multi_horizon_ensemble.py compatibility
             swing_ensemble_data = {
@@ -1160,8 +1225,12 @@ def _save_best_model(
                 '_is_fitted': True
             }
             swing_path = model_dir / "swing_ensemble.pkl"
-            joblib.dump(swing_ensemble_data, swing_path)
-            LOGGER.info(f"✓ Saved swing_ensemble.pkl for multi-horizon ensemble compatibility")
+            try:
+                joblib.dump(swing_ensemble_data, swing_path)
+                LOGGER.info(f"✓ Saved swing_ensemble.pkl to {swing_path}")
+            except Exception as e:
+                LOGGER.error(f"✗ Failed to save swing_ensemble: {e}", exc_info=True)
+                raise
             
             # Save training metadata
             metadata = {
@@ -1174,11 +1243,34 @@ def _save_best_model(
                 "total_samples": len(X_all),
             }
             metadata_path = model_dir / "training_metadata.json"
-            with open(metadata_path, "w") as f:
-                json.dump(metadata, f, indent=2)
-            LOGGER.info(f"✓ Saved training metadata to {metadata_path}")
+            try:
+                with open(metadata_path, "w") as f:
+                    json.dump(metadata, f, indent=2)
+                LOGGER.info(f"✓ Saved training metadata to {metadata_path}")
+            except Exception as e:
+                LOGGER.error(f"✗ Failed to save metadata: {e}", exc_info=True)
+                raise
             
-            LOGGER.info(f"✓ All model artifacts saved to {model_dir}")
+            # Verify all files were saved
+            saved_files = [
+                model_path,
+                feature_path,
+                hmm_path,
+                swing_path,
+                metadata_path
+            ]
+            missing_files = [f for f in saved_files if not f.exists()]
+            if missing_files:
+                LOGGER.error(f"✗ Some files were not saved: {missing_files}")
+            else:
+                LOGGER.info("=" * 80)
+                LOGGER.info(f"✓ All model artifacts successfully saved to {model_dir.absolute()}")
+                LOGGER.info(f"  - Model: {model_path.name}")
+                LOGGER.info(f"  - Features: {feature_path.name}")
+                LOGGER.info(f"  - HMM: {hmm_path.name}")
+                LOGGER.info(f"  - Swing Ensemble: {swing_path.name}")
+                LOGGER.info(f"  - Metadata: {metadata_path.name}")
+                LOGGER.info("=" * 80)
         
     except Exception as e:
         LOGGER.error(f"Error saving best model: {e}", exc_info=True)
