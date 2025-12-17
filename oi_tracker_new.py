@@ -5650,7 +5650,7 @@ if __name__ == '__main__':
         except Exception as e:
             logging.error(f"Failed to start dashboard server: {e}")
 
-        socketio.run(app, host=host, port=port, debug=False, use_reloader=False, allow_unsafe_werkzeug=True)
+        socketio.run(app, host=host, port=port, debug=False, use_reloader=False,allow_unsafe_werkzeug=True)
         
     except (KeyboardInterrupt, SystemExit):
         logging.info("\n\n✓ Server stopped by user")
