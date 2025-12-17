@@ -14,6 +14,8 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import multiprocessing as mp
+import os
 import signal
 import sys
 from dataclasses import asdict, dataclass, field
@@ -24,6 +26,21 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 from sklearn.metrics import classification_report, f1_score
+
+# Configure multiprocessing for macOS compatibility (must be done early, before any multiprocessing imports)
+# macOS (especially Apple Silicon M1/M2) requires 'spawn' instead of 'fork' to avoid segfaults
+try:
+    mp.set_start_method('spawn', force=False)
+except RuntimeError:
+    # Already set by another module (e.g., oi_tracker_new.py), ignore
+    pass
+
+# Disable stable-baselines3 multiprocessing to avoid segfaults on macOS
+# This uses single-threaded training which is slower but more stable
+os.environ.setdefault('OMP_NUM_THREADS', '1')
+os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
+os.environ.setdefault('MKL_NUM_THREADS', '1')
+os.environ.setdefault('NUMEXPR_NUM_THREADS', '1')
 
 import database_new as db
 from feature_engineering import FeatureEngineeringError, REQUIRED_FEATURE_COLUMNS, prepare_training_features
@@ -618,9 +635,11 @@ def _train_rl_segment(
                 sys.stdout.flush()
                 
                 if algorithm == "PPO":
-                    model = PPO("MlpPolicy", trial_env, verbose=1, **params)  # verbose=1 to see progress
+                    # Disable verbose and use single process to avoid multiprocessing issues
+                    model = PPO("MlpPolicy", trial_env, verbose=0, **params)
                 else:  # DQN
-                    model = DQN("MlpPolicy", trial_env, verbose=1, **params)  # verbose=1 to see progress
+                    # Disable verbose and use single process to avoid multiprocessing issues
+                    model = DQN("MlpPolicy", trial_env, verbose=0, **params)
                 
                 LOGGER.info(f"RL Optuna trial {trial.number}: Model created. Starting training for {timesteps} timesteps...")
                 LOGGER.info(f"RL Optuna trial {trial.number}: This may take 1-5 minutes. Please wait...")
@@ -630,15 +649,20 @@ def _train_rl_segment(
                 import time
                 start_time = time.time()
                 
-                # Add progress callback or periodic logging
-                # Only use progress_bar if dependencies are available
+                # Train the model (disable progress bar to reduce multiprocessing overhead)
                 try:
-                    if PROGRESS_BAR_AVAILABLE:
-                        model.learn(total_timesteps=timesteps, progress_bar=True)
-                    else:
-                        model.learn(total_timesteps=timesteps, progress_bar=False)
+                    model.learn(total_timesteps=timesteps, progress_bar=False, log_interval=100)
                 except Exception as e:
                     LOGGER.error(f"RL Optuna trial {trial.number}: model.learn() failed: {e}", exc_info=True)
+                    # Clean up training resources on training failure
+                    try:
+                        del model
+                        del trial_env
+                        del trial_base_env
+                        import gc
+                        gc.collect()
+                    except:
+                        pass
                     raise
                 
                 elapsed = time.time() - start_time
@@ -663,28 +687,41 @@ def _train_rl_segment(
                 episodes = 0
                 max_steps_per_episode = min(len(val_df), 1000)  # Safety limit
                 
-                for episode_num in range(5):  # 5 evaluation episodes
-                    obs, _ = val_env.reset()
-                    episode_reward = 0.0
-                    done = False
-                    truncated = False
-                    steps = 0
+                try:
+                    for episode_num in range(5):  # 5 evaluation episodes
+                        obs, _ = val_env.reset()
+                        episode_reward = 0.0
+                        done = False
+                        truncated = False
+                        steps = 0
+                        
+                        while not (done or truncated) and steps < max_steps_per_episode:
+                            action, _ = model.predict(obs, deterministic=True)
+                            obs, reward, done, truncated, _ = val_env.step(action)
+                            episode_reward += reward
+                            steps += 1
+                        
+                        if steps >= max_steps_per_episode:
+                            LOGGER.warning(f"RL Optuna trial episode {episode_num} hit step limit ({max_steps_per_episode})")
+                        
+                        total_reward += episode_reward
+                        episodes += 1
                     
-                    while not (done or truncated) and steps < max_steps_per_episode:
-                        action, _ = model.predict(obs, deterministic=True)
-                        obs, reward, done, truncated, _ = val_env.step(action)
-                        episode_reward += reward
-                        steps += 1
-                    
-                    if steps >= max_steps_per_episode:
-                        LOGGER.warning(f"RL Optuna trial episode {episode_num} hit step limit ({max_steps_per_episode})")
-                    
-                    total_reward += episode_reward
-                    episodes += 1
-                
-                avg_reward = total_reward / max(episodes, 1)
-                LOGGER.info(f"RL Optuna trial {trial.number}: Completed with avg reward: {avg_reward:.3f}")
-                return avg_reward
+                    avg_reward = total_reward / max(episodes, 1)
+                    LOGGER.info(f"RL Optuna trial {trial.number}: Completed with avg reward: {avg_reward:.3f}")
+                    return avg_reward
+                finally:
+                    # Clean up resources after evaluation is complete
+                    try:
+                        del model
+                        del trial_env
+                        del trial_base_env
+                        del val_env
+                        del val_base_env
+                        import gc
+                        gc.collect()
+                    except:
+                        pass
             except Exception as e:
                 LOGGER.error(f"RL Optuna trial {trial.number} failed: {e}", exc_info=True)
                 return -1.0  # Return negative reward for failed trials
@@ -732,9 +769,13 @@ def _train_rl_segment(
         import time
         start_time = time.time()
         LOGGER.info(f"Starting final model training (this may take several minutes)...")
-        model.learn(total_timesteps=timesteps)
+        model.learn(total_timesteps=timesteps, progress_bar=False, log_interval=100)
         elapsed = time.time() - start_time
         LOGGER.info(f"Final {family.algorithm} model training complete in {elapsed:.1f} seconds")
+        
+        # Clean up after training
+        import gc
+        gc.collect()
     except Exception as e:
         LOGGER.error(f"RL model training failed: {e}")
         # Return default metrics on failure

@@ -729,8 +729,58 @@ def save_option_chain_snapshot(exchange, call_options, put_options, underlying_p
                 
                 feature_payload = _serialize_feature_dict(ml_features_dict)
                 
+                # Always fetch sentiment scores directly from macro_signals to ensure synchronization
+                # Match by exchange and timestamp (up to minutes, ignoring seconds)
+                sentiment_score_50 = None
+                sentiment_score_100 = None
+                trin_50 = None
+                trin_100 = None
+                
+                try:
+                    if config.db_type == 'postgres':
+                        cursor.execute(f'''
+                            SELECT sentiment_score_50, sentiment_score_100, trin_50, trin_100
+                            FROM macro_signals
+                            WHERE exchange = {ph}
+                              AND DATE_TRUNC('minute', timestamp) = DATE_TRUNC('minute', {ph}::timestamp)
+                            ORDER BY timestamp DESC
+                            LIMIT 1
+                        ''', (exchange, timestamp_iso))
+                    else:
+                        # SQLite - match timestamps up to minutes (same logic as update_sentiment_scores.py)
+                        cursor.execute(f'''
+                            SELECT sentiment_score_50, sentiment_score_100, trin_50, trin_100
+                            FROM macro_signals
+                            WHERE exchange = {ph}
+                              AND strftime('%Y-%m-%d %H:%M', timestamp) = strftime('%Y-%m-%d %H:%M', {ph})
+                            ORDER BY timestamp DESC
+                            LIMIT 1
+                        ''', (exchange, timestamp_iso))
+                    
+                    row = cursor.fetchone()
+                    if row:
+                        sentiment_score_50 = row[0]
+                        sentiment_score_100 = row[1]
+                        trin_50 = row[2]
+                        trin_100 = row[3]
+                        logging.debug(f"[{exchange}] Fetched sentiment scores from macro_signals: score_50={sentiment_score_50}, score_100={sentiment_score_100}")
+                    else:
+                        logging.debug(f"[{exchange}] No matching macro_signals found for timestamp {timestamp_iso}, using fallback values")
+                except Exception as e:
+                    logging.warning(f"[{exchange}] Could not fetch sentiment scores from macro_signals: {e}")
+                
+                # Fallback to ml_features_dict values if query fails or no match found
+                if sentiment_score_50 is None:
+                    sentiment_score_50 = ml_features_dict.get('macro_sentiment_score_50')
+                if sentiment_score_100 is None:
+                    sentiment_score_100 = ml_features_dict.get('macro_sentiment_score_100')
+                if trin_50 is None:
+                    trin_50 = ml_features_dict.get('macro_trin_50')
+                if trin_100 is None:
+                    trin_100 = ml_features_dict.get('macro_trin_100')
+                
                 # Sanitize all ML feature values to standard Python types to avoid "np.float64" db errors
-                # Extract sentiment values from macro features (they're prefixed with 'macro_' in the dict)
+                # Use sentiment scores from macro_signals (fetched above) instead of ml_features_dict
                 raw_vals = [
                     ml_features_dict.get('pcr_total_oi'),
                     ml_features_dict.get('pcr_itm_oi'),
@@ -756,11 +806,11 @@ def save_option_chain_snapshot(exchange, call_options, put_options, underlying_p
                     ml_features_dict.get('ce_volume_to_oi_ratio'),
                     ml_features_dict.get('pe_volume_to_oi_ratio'),
                     ml_features_dict.get('news_sentiment_score'),
-                    # NIFTY sentiment features (extract from macro_ prefixed keys)
-                    ml_features_dict.get('macro_sentiment_score_50'),
-                    ml_features_dict.get('macro_sentiment_score_100'),
-                    ml_features_dict.get('macro_trin_50'),
-                    ml_features_dict.get('macro_trin_100'),
+                    # NIFTY sentiment features (from macro_signals table, not ml_features_dict)
+                    sentiment_score_50,
+                    sentiment_score_100,
+                    trin_50,
+                    trin_100,
                     # NSE Option Chain Features
                     ml_features_dict.get('oi_next_sentiment'),
                     ml_features_dict.get('nse_next_oi_call_total'),
