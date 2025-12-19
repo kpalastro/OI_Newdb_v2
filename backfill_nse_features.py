@@ -265,35 +265,19 @@ def update_record_with_nse_features(exchange: str, timestamp: datetime,
         ]
         
         # Update query for PostgreSQL
-        if get_config().db_type == 'postgres':
-            update_query = f"""
-                UPDATE ml_features
-                SET nse_next_oi_call_total = {ph},
-                    nse_next_oi_put_total = {ph},
-                    nse_next_oi_change_call_total = {ph},
-                    nse_next_oi_change_put_total = {ph},
-                    nse_next_volume_call_total = {ph},
-                    nse_next_volume_put_total = {ph},
-                    nse_next_oi_change_diff_put_call = {ph},
-                    oi_next_sentiment = {ph}
-                WHERE exchange = {ph} AND timestamp = {ph}
-            """
-            cursor.execute(update_query, (*update_vals, exchange, timestamp))
-        else:
-            # SQLite
-            update_query = f"""
-                UPDATE ml_features
-                SET nse_next_oi_call_total = {ph},
-                    nse_next_oi_put_total = {ph},
-                    nse_next_oi_change_call_total = {ph},
-                    nse_next_oi_change_put_total = {ph},
-                    nse_next_volume_call_total = {ph},
-                    nse_next_volume_put_total = {ph},
-                    nse_next_oi_change_diff_put_call = {ph},
-                    oi_next_sentiment = {ph}
-                WHERE exchange = {ph} AND timestamp = {ph}
-            """
-            cursor.execute(update_query, (*update_vals, exchange, timestamp))
+        update_query = f"""
+            UPDATE ml_features
+            SET nse_next_oi_call_total = {ph},
+                nse_next_oi_put_total = {ph},
+                nse_next_oi_change_call_total = {ph},
+                nse_next_oi_change_put_total = {ph},
+                nse_next_volume_call_total = {ph},
+                nse_next_volume_put_total = {ph},
+                nse_next_oi_change_diff_put_call = {ph},
+                oi_next_sentiment = {ph}
+            WHERE exchange = {ph} AND timestamp = {ph}
+        """
+        cursor.execute(update_query, (*update_vals, exchange, timestamp))
         
         rows_updated = cursor.rowcount
         conn.commit()
