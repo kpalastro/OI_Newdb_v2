@@ -23,19 +23,15 @@ ENV/
 logs/
 build/
 dist/
-metrics/phase_1/
-metrics/phase_2/
-metrics/phase_3/
-metrics/phase_4/
-metrics/phase_5/
-metrics/phase_6/
-metrics/phase_7/
-metrics/phase_8/
-metrics/phase_9/
-metrics/phase_10/
+
+trade_logs/
+metrics/phase2_metrics/
+metrics/rl_contribution_report.json
+state/reels_snapshot.pkl
 
 models/NSE/
 models/BSE/
+models/rl_*.zip
 *.egg-info/
 
 # IDE

@@ -32,10 +32,15 @@ def export_all_data():
         
         # Use simple string formatting for the date to avoid placeholder issues across DBs 
         # since pandas read_sql params handling can be tricky with raw psycopg2 connections
+        # query = f"""
+        #     SELECT *
+        #     FROM option_chain_snapshots
+        #     WHERE date(timestamp) = '{today_str}'
+        #     ORDER BY timestamp DESC, exchange, strike, option_type
+        # """
         query = f"""
             SELECT *
             FROM option_chain_snapshots
-            WHERE date(timestamp) = '{today_str}'
             ORDER BY timestamp DESC, exchange, strike, option_type
         """
         

@@ -29,7 +29,6 @@ from config import get_config
 import numpy as np
 import pandas as pd
 
-DB_FILE = "db_new.db"
 TRAINING_EXPORT_DIR = Path("exports") / "training_batches"
 REPORTS_DIR = Path("reports")
 db_lock = Lock()
@@ -146,7 +145,8 @@ def _safe_json_dumps(payload: dict | None) -> str | None:
 
 
 def _get_placeholder():
-    return '%s' if get_config().db_type == 'postgres' else '?'
+    """Return PostgreSQL placeholder (always '%s' since we only support PostgreSQL)."""
+    return '%s'
 
 def initialize_database():
     """Initialize complete database schema with separate ML features table (PostgreSQL only)."""
@@ -295,6 +295,8 @@ def initialize_database():
                     sentiment_score_100 DOUBLE PRECISION,
                     sentiment_confidence_100 DOUBLE PRECISION,
                     trin_100 DOUBLE PRECISION,
+                    sentiment_score DOUBLE PRECISION,
+                    sentiment_confidence DOUBLE PRECISION,
                     created_at TIMESTAMP DEFAULT NOW()
                 )
                 ''',
@@ -470,9 +472,9 @@ def migrate_database():
             """)
             macro_cols = {row[0] for row in cursor.fetchall()}
             
-            # Remove old sentiment columns (if they exist)
+            # Remove old sentiment columns (if they exist) - but keep sentiment_score and sentiment_confidence
             old_sentiment_cols = [
-                'sentiment_score', 'sentiment_confidence', 'sentiment_summary', 
+                'sentiment_summary', 
                 'sentiment_drivers', 'news_sentiment_score', 'news_sentiment_summary'
             ]
             for col in old_sentiment_cols:
@@ -493,6 +495,17 @@ def migrate_database():
                 ('trin_100', 'DOUBLE PRECISION'),
             ]
             for col_name, col_type in new_sentiment_cols:
+                if col_name not in macro_cols:
+                    cursor.execute(f'ALTER TABLE macro_signals ADD COLUMN {col_name} {col_type}')
+                    logging.info(f"Added column {col_name} to macro_signals")
+            
+            # Add aggregated sentiment_score and sentiment_confidence columns (computed from _50 and _100)
+            # These are convenience columns that aggregate the NIFTY50 and NIFTY100 sentiment
+            aggregated_sentiment_cols = [
+                ('sentiment_score', 'DOUBLE PRECISION'),
+                ('sentiment_confidence', 'DOUBLE PRECISION'),
+            ]
+            for col_name, col_type in aggregated_sentiment_cols:
                 if col_name not in macro_cols:
                     cursor.execute(f'ALTER TABLE macro_signals ADD COLUMN {col_name} {col_type}')
                     logging.info(f"Added column {col_name} to macro_signals")
@@ -520,7 +533,16 @@ def migrate_database():
                 ('sentiment_score_50', 'DOUBLE PRECISION'),
                 ('sentiment_score_100', 'DOUBLE PRECISION'),
                 ('trin_50', 'DOUBLE PRECISION'),
-                ('trin_100', 'DOUBLE PRECISION')
+                ('trin_100', 'DOUBLE PRECISION'),
+                # NSE Option Chain Features
+                ('oi_next_sentiment', 'DOUBLE PRECISION'),
+                ('nse_next_oi_call_total', 'DOUBLE PRECISION'),
+                ('nse_next_oi_put_total', 'DOUBLE PRECISION'),
+                ('nse_next_oi_change_call_total', 'DOUBLE PRECISION'),
+                ('nse_next_oi_change_put_total', 'DOUBLE PRECISION'),
+                ('nse_next_volume_call_total', 'DOUBLE PRECISION'),
+                ('nse_next_volume_put_total', 'DOUBLE PRECISION'),
+                ('nse_next_oi_change_diff_put_call', 'DOUBLE PRECISION')
             ]
             for col, col_type in ml_feature_cols:
                 if col not in ml_cols:
@@ -643,72 +665,80 @@ def save_option_chain_snapshot(exchange, call_options, put_options, underlying_p
             # because we provide all the values explicitly. The DEFAULT only applies
             # if the column is omitted, which we are not doing.
             if records:
-                config = get_config()
                 placeholders = ', '.join([_get_placeholder()] * len(records[0]))
                 
-                if config.db_type == 'postgres':
-                    # Postgres "INSERT ... ON CONFLICT"
-                    # Assuming UNIQUE constraint on (timestamp, exchange, strike, option_type)
-                    # We construct DO UPDATE SET ... to behave like REPLACE
-                    
-                    # Construct column list manually to ensure correct mapping
-                    cols = [
-                        "timestamp", "exchange", "strike", "option_type", "symbol", "oi", "ltp", "token", 
-                        "underlying_price", "moneyness", "time_to_expiry_seconds", "pct_change_3m", 
-                        "pct_change_5m", "pct_change_10m", "pct_change_15m", "pct_change_30m", "iv", "volume",
-                        "best_bid", "best_ask", "bid_quantity", "ask_quantity", "spread", "order_book_imbalance",
-                        "created_at", "updated_at"
-                    ]
-                    
-                    # Build update clause: "oi = EXCLUDED.oi, ltp = EXCLUDED.ltp, ..."
-                    update_clause = ", ".join([f"{col} = EXCLUDED.{col}" for col in cols if col != "id"])
-                    
-                    query = f'''
-                        INSERT INTO option_chain_snapshots 
-                        ({', '.join(cols)})
-                        VALUES ({placeholders})
-                        ON CONFLICT (timestamp, exchange, strike, option_type)
-                        DO UPDATE SET {update_clause}
-                    '''
-                    # Need to strip 'id' from records if it was auto-generated? 
-                    # records tuple doesn't have 'id'. Correct.
-                    # But records tuple has 25 items. My cols list has 24.
-                    # Let's count.
-                    # record = (timestamp_iso, exchange, strike, type, symbol, oi, ltp, token, underlying, moneyness, tte,
-                    #           3m, 5m, 10m, 15m, 30m, iv, vol, bid, ask, bidq, askq, spread, imbalance) -> 24 items.
-                    # Wait, the original INSERT has 25 columns in VALUES (NULL, ...). 
-                    # SQLite uses NULL for auto-increment ID.
-                    # My `records` list does NOT include NULL for ID.
-                    # The original code: 
-                    # VALUES (NULL, ?, ?, ...)
-                    # records elements correspond to the `?` placeholders.
-                    # So `records` has 24 items. 
-                    # The VALUES clause had 25 slots because of NULL for ID.
-                    
-                    # For Postgres, we omit ID column in INSERT to auto-increment.
-                    cursor.executemany(query, records)
-                    
-                else:
-                    # SQLite
-                    cursor.executemany(f'''
-                        INSERT OR REPLACE INTO option_chain_snapshots 
-                        (id, timestamp, exchange, strike, option_type, symbol, oi, ltp, token, 
-                         underlying_price, moneyness, time_to_expiry_seconds, pct_change_3m, 
-                         pct_change_5m, pct_change_10m, pct_change_15m, pct_change_30m, iv, volume,
-                         best_bid, best_ask, bid_quantity, ask_quantity, spread, order_book_imbalance,
-                         created_at, updated_at)
-                        VALUES (NULL, {placeholders})
-                    ''', records)
+                # PostgreSQL "INSERT ... ON CONFLICT"
+                # Assuming UNIQUE constraint on (timestamp, exchange, strike, option_type)
+                # We construct DO UPDATE SET ... to behave like REPLACE
+                
+                # Construct column list manually to ensure correct mapping
+                cols = [
+                    "timestamp", "exchange", "strike", "option_type", "symbol", "oi", "ltp", "token", 
+                    "underlying_price", "moneyness", "time_to_expiry_seconds", "pct_change_3m", 
+                    "pct_change_5m", "pct_change_10m", "pct_change_15m", "pct_change_30m", "iv", "volume",
+                    "best_bid", "best_ask", "bid_quantity", "ask_quantity", "spread", "order_book_imbalance",
+                    "created_at", "updated_at"
+                ]
+                
+                # Build update clause: "oi = EXCLUDED.oi, ltp = EXCLUDED.ltp, ..."
+                update_clause = ", ".join([f"{col} = EXCLUDED.{col}" for col in cols if col != "id"])
+                
+                query = f'''
+                    INSERT INTO option_chain_snapshots 
+                    ({', '.join(cols)})
+                    VALUES ({placeholders})
+                    ON CONFLICT (timestamp, exchange, strike, option_type)
+                    DO UPDATE SET {update_clause}
+                '''
+                cursor.executemany(query, records)
 
             # Save ML features
             if ml_features_dict:
-                config = get_config()
                 ph = _get_placeholder()
                 
                 feature_payload = _serialize_feature_dict(ml_features_dict)
                 
+                # Always fetch sentiment scores directly from macro_signals to ensure synchronization
+                # Match by exchange and timestamp (up to minutes, ignoring seconds)
+                sentiment_score_50 = None
+                sentiment_score_100 = None
+                trin_50 = None
+                trin_100 = None
+                
+                try:
+                    cursor.execute(f'''
+                        SELECT sentiment_score_50, sentiment_score_100, trin_50, trin_100
+                        FROM macro_signals
+                        WHERE exchange = {ph}
+                          AND DATE_TRUNC('minute', timestamp) = DATE_TRUNC('minute', {ph}::timestamp)
+                        ORDER BY timestamp DESC
+                        LIMIT 1
+                    ''', (exchange, timestamp_iso))
+                    
+                    row = cursor.fetchone()
+                    if row:
+                        sentiment_score_50 = row[0]
+                        sentiment_score_100 = row[1]
+                        trin_50 = row[2]
+                        trin_100 = row[3]
+                        logging.debug(f"[{exchange}] Fetched sentiment scores from macro_signals: score_50={sentiment_score_50}, score_100={sentiment_score_100}")
+                    else:
+                        logging.debug(f"[{exchange}] No matching macro_signals found for timestamp {timestamp_iso}, using fallback values")
+                except Exception as e:
+                    logging.warning(f"[{exchange}] Could not fetch sentiment scores from macro_signals: {e}")
+                
+                # Fallback to ml_features_dict values if query fails or no match found
+                if sentiment_score_50 is None:
+                    sentiment_score_50 = ml_features_dict.get('macro_sentiment_score_50')
+                if sentiment_score_100 is None:
+                    sentiment_score_100 = ml_features_dict.get('macro_sentiment_score_100')
+                if trin_50 is None:
+                    trin_50 = ml_features_dict.get('macro_trin_50')
+                if trin_100 is None:
+                    trin_100 = ml_features_dict.get('macro_trin_100')
+                
                 # Sanitize all ML feature values to standard Python types to avoid "np.float64" db errors
-                # Extract sentiment values from macro features (they're prefixed with 'macro_' in the dict)
+                # Use sentiment scores from macro_signals (fetched above) instead of ml_features_dict
                 raw_vals = [
                     ml_features_dict.get('pcr_total_oi'),
                     ml_features_dict.get('pcr_itm_oi'),
@@ -734,11 +764,20 @@ def save_option_chain_snapshot(exchange, call_options, put_options, underlying_p
                     ml_features_dict.get('ce_volume_to_oi_ratio'),
                     ml_features_dict.get('pe_volume_to_oi_ratio'),
                     ml_features_dict.get('news_sentiment_score'),
-                    # NIFTY sentiment features (extract from macro_ prefixed keys)
-                    ml_features_dict.get('macro_sentiment_score_50'),
-                    ml_features_dict.get('macro_sentiment_score_100'),
-                    ml_features_dict.get('macro_trin_50'),
-                    ml_features_dict.get('macro_trin_100'),
+                    # NIFTY sentiment features (from macro_signals table, not ml_features_dict)
+                    sentiment_score_50,
+                    sentiment_score_100,
+                    trin_50,
+                    trin_100,
+                    # NSE Option Chain Features
+                    ml_features_dict.get('oi_next_sentiment'),
+                    ml_features_dict.get('nse_next_oi_call_total'),
+                    ml_features_dict.get('nse_next_oi_put_total'),
+                    ml_features_dict.get('nse_next_oi_change_call_total'),
+                    ml_features_dict.get('nse_next_oi_change_put_total'),
+                    ml_features_dict.get('nse_next_volume_call_total'),
+                    ml_features_dict.get('nse_next_volume_put_total'),
+                    ml_features_dict.get('nse_next_oi_change_diff_put_call'),
                 ]
                 # Apply sanitization (converts np.float/int to python float/int)
                 sanitized_vals = [_sanitize_feature_value(v) for v in raw_vals]
@@ -750,69 +789,50 @@ def save_option_chain_snapshot(exchange, call_options, put_options, underlying_p
                     feature_payload
                 )
                 
-                if config.db_type == 'postgres':
-                    cols = [
-                        "timestamp", "exchange", "pcr_total_oi", "pcr_itm_oi", "pcr_total_volume", 
-                        "futures_premium", "time_to_expiry_hours", "vix", "underlying_price",
-                        "underlying_future_price", "underlying_future_oi", "total_itm_oi_ce", 
-                        "total_itm_oi_pe", "atm_shift_intensity", "itm_ce_breadth", "itm_pe_breadth", 
-                        "percent_oichange_fut_3m", "itm_oi_ce_pct_change_3m_wavg", 
-                        "itm_oi_pe_pct_change_3m_wavg",
-                        "dealer_vanna_exposure", "dealer_charm_exposure", "net_gamma_exposure",
-                        "gamma_flip_level", "ce_volume_to_oi_ratio", "pe_volume_to_oi_ratio",
-                        "news_sentiment_score",
-                        "sentiment_score_50", "sentiment_score_100", "trin_50", "trin_100",
-                        "created_at", "feature_payload"
-                    ]
-                    placeholders_str = ', '.join([ph] * len(cols))
-                    update_clause = ", ".join([f"{col} = EXCLUDED.{col}" for col in cols])
-                    
-                    query = f'''
-                        INSERT INTO ml_features ({', '.join(cols)})
-                        VALUES ({placeholders_str})
-                        ON CONFLICT (timestamp, exchange)
-                        DO UPDATE SET {update_clause}
-                    '''
-                    cursor.execute(query, ml_record)
-                else:
-                    cursor.execute(f'''
-                        INSERT OR REPLACE INTO ml_features 
-                        (timestamp, exchange, pcr_total_oi, pcr_itm_oi, pcr_total_volume, 
-                         futures_premium, time_to_expiry_hours, vix, underlying_price,
-                         underlying_future_price, underlying_future_oi, total_itm_oi_ce, 
-                         total_itm_oi_pe, atm_shift_intensity, itm_ce_breadth, itm_pe_breadth, 
-                         percent_oichange_fut_3m, itm_oi_ce_pct_change_3m_wavg, 
-                         itm_oi_pe_pct_change_3m_wavg, dealer_vanna_exposure, dealer_charm_exposure,
-                         net_gamma_exposure, gamma_flip_level, ce_volume_to_oi_ratio, pe_volume_to_oi_ratio,
-                         news_sentiment_score,
-                         sentiment_score_50, sentiment_score_100, trin_50, trin_100,
-                         created_at, feature_payload)
-                        VALUES ({', '.join([ph]*32)})
-                    ''', ml_record)
+                cols = [
+                    "timestamp", "exchange", "pcr_total_oi", "pcr_itm_oi", "pcr_total_volume", 
+                    "futures_premium", "time_to_expiry_hours", "vix", "underlying_price",
+                    "underlying_future_price", "underlying_future_oi", "total_itm_oi_ce", 
+                    "total_itm_oi_pe", "atm_shift_intensity", "itm_ce_breadth", "itm_pe_breadth", 
+                    "percent_oichange_fut_3m", "itm_oi_ce_pct_change_3m_wavg", 
+                    "itm_oi_pe_pct_change_3m_wavg",
+                    "dealer_vanna_exposure", "dealer_charm_exposure", "net_gamma_exposure",
+                    "gamma_flip_level", "ce_volume_to_oi_ratio", "pe_volume_to_oi_ratio",
+                    "news_sentiment_score",
+                    "sentiment_score_50", "sentiment_score_100", "trin_50", "trin_100",
+                    "oi_next_sentiment",
+                    "nse_next_oi_call_total", "nse_next_oi_put_total",
+                    "nse_next_oi_change_call_total", "nse_next_oi_change_put_total",
+                    "nse_next_volume_call_total", "nse_next_volume_put_total",
+                    "nse_next_oi_change_diff_put_call",
+                    "created_at", "feature_payload"
+                ]
+                placeholders_str = ', '.join([ph] * len(cols))
+                update_clause = ", ".join([f"{col} = EXCLUDED.{col}" for col in cols])
+                
+                query = f'''
+                    INSERT INTO ml_features ({', '.join(cols)})
+                    VALUES ({placeholders_str})
+                    ON CONFLICT (timestamp, exchange)
+                    DO UPDATE SET {update_clause}
+                '''
+                cursor.execute(query, ml_record)
             
             # Update metadata
             ph = _get_placeholder()
-            if get_config().db_type == 'postgres':
-                cursor.execute(f'''
-                    INSERT INTO exchange_metadata 
-                    (exchange, last_update_time, last_atm_strike, last_underlying_price, 
-                     last_future_price, last_future_oi, updated_at)
-                    VALUES ({', '.join([ph]*7)})
-                    ON CONFLICT (exchange) DO UPDATE SET
-                    last_update_time = EXCLUDED.last_update_time,
-                    last_atm_strike = EXCLUDED.last_atm_strike,
-                    last_underlying_price = EXCLUDED.last_underlying_price,
-                    last_future_price = EXCLUDED.last_future_price,
-                    last_future_oi = EXCLUDED.last_future_oi,
-                    updated_at = EXCLUDED.updated_at
-                ''', (exchange, timestamp_iso, atm_strike, underlying_price, underlying_future_price, underlying_future_oi, current_time_iso))
-            else:
-                cursor.execute(f'''
-                    INSERT OR REPLACE INTO exchange_metadata 
-                    (exchange, last_update_time, last_atm_strike, last_underlying_price, 
-                     last_future_price, last_future_oi, updated_at)
-                    VALUES ({', '.join([ph]*7)})
-                ''', (exchange, timestamp_iso, atm_strike, underlying_price, underlying_future_price, underlying_future_oi, current_time_iso))
+            cursor.execute(f'''
+                INSERT INTO exchange_metadata 
+                (exchange, last_update_time, last_atm_strike, last_underlying_price, 
+                 last_future_price, last_future_oi, updated_at)
+                VALUES ({', '.join([ph]*7)})
+                ON CONFLICT (exchange) DO UPDATE SET
+                last_update_time = EXCLUDED.last_update_time,
+                last_atm_strike = EXCLUDED.last_atm_strike,
+                last_underlying_price = EXCLUDED.last_underlying_price,
+                last_future_price = EXCLUDED.last_future_price,
+                last_future_oi = EXCLUDED.last_future_oi,
+                updated_at = EXCLUDED.updated_at
+            ''', (exchange, timestamp_iso, atm_strike, underlying_price, underlying_future_price, underlying_future_oi, current_time_iso))
             
             conn.commit()
             logging.info(f"✓ Saved {len(records)} records + ML features for {exchange}")
@@ -1162,6 +1182,11 @@ def save_macro_signals(exchange: str, fii_flow: float | None = None, dii_flow: f
         sentiment_score_100: NIFTY100 sentiment score (0-100)
         sentiment_confidence_100: NIFTY100 confidence (0-100)
         trin_100: NIFTY100 TRIN value
+    
+    Note:
+        sentiment_score and sentiment_confidence are computed as:
+        - Average of _50 and _100 values if both are available
+        - Otherwise, use whichever value is available
     """
     if timestamp is None:
         timestamp = now_ist()
@@ -1175,6 +1200,24 @@ def save_macro_signals(exchange: str, fii_flow: float | None = None, dii_flow: f
             conn = get_db_connection()
             cursor = conn.cursor()
             ph = _get_placeholder()
+            # Compute aggregated sentiment_score and sentiment_confidence
+            # Use average of _50 and _100 if both are available, otherwise use whichever is available
+            sentiment_score = None
+            sentiment_confidence = None
+            if sentiment_score_50 is not None and sentiment_score_100 is not None:
+                sentiment_score = (sentiment_score_50 + sentiment_score_100) / 2.0
+            elif sentiment_score_50 is not None:
+                sentiment_score = sentiment_score_50
+            elif sentiment_score_100 is not None:
+                sentiment_score = sentiment_score_100
+            
+            if sentiment_confidence_50 is not None and sentiment_confidence_100 is not None:
+                sentiment_confidence = (sentiment_confidence_50 + sentiment_confidence_100) / 2.0
+            elif sentiment_confidence_50 is not None:
+                sentiment_confidence = sentiment_confidence_50
+            elif sentiment_confidence_100 is not None:
+                sentiment_confidence = sentiment_confidence_100
+            
             cursor.execute(f'''
                 INSERT INTO macro_signals (
                     timestamp, exchange, fii_flow, dii_flow, fii_dii_net,
@@ -1182,8 +1225,9 @@ def save_macro_signals(exchange: str, fii_flow: float | None = None, dii_flow: f
                     banknifty_correlation, macro_spread, risk_on_score, metadata,
                     sentiment_score_50, sentiment_confidence_50, trin_50,
                     sentiment_score_100, sentiment_confidence_100, trin_100,
+                    sentiment_score, sentiment_confidence,
                     created_at
-                ) VALUES ({', '.join([ph]*20)})
+                ) VALUES ({', '.join([ph]*22)})
             ''', (
                 _coerce_iso_timestamp(timestamp),
                 exchange,
@@ -1204,6 +1248,8 @@ def save_macro_signals(exchange: str, fii_flow: float | None = None, dii_flow: f
                 sentiment_score_100,
                 sentiment_confidence_100,
                 trin_100,
+                sentiment_score,
+                sentiment_confidence,
                 _coerce_iso_timestamp(now_ist())
             ))
             conn.commit()
@@ -1439,48 +1485,33 @@ def save_multi_resolution_bars(
             cursor = conn.cursor()
             ph = _get_placeholder()
             
-            if get_config().db_type == 'postgres':
-                cursor.execute(f'''
-                    INSERT INTO multi_resolution_bars (
-                        timestamp, exchange, resolution, token, symbol,
-                        open_price, high_price, low_price, close_price,
-                        volume, oi, oi_change, vwap, trade_count,
-                        spread_avg, imbalance_avg, created_at
-                    ) VALUES ({', '.join([ph]*17)})
-                    ON CONFLICT (timestamp, exchange, resolution, token)
-                    DO UPDATE SET
-                        open_price = EXCLUDED.open_price,
-                        high_price = EXCLUDED.high_price,
-                        low_price = EXCLUDED.low_price,
-                        close_price = EXCLUDED.close_price,
-                        volume = EXCLUDED.volume,
-                        oi = EXCLUDED.oi,
-                        oi_change = EXCLUDED.oi_change,
-                        vwap = EXCLUDED.vwap,
-                        trade_count = EXCLUDED.trade_count,
-                        spread_avg = EXCLUDED.spread_avg,
-                        imbalance_avg = EXCLUDED.imbalance_avg,
-                        created_at = EXCLUDED.created_at
-                ''', (
-                    timestamp_iso, exchange, resolution, token, symbol,
+            cursor.execute(f'''
+                INSERT INTO multi_resolution_bars (
+                    timestamp, exchange, resolution, token, symbol,
                     open_price, high_price, low_price, close_price,
                     volume, oi, oi_change, vwap, trade_count,
-                    spread_avg, imbalance_avg, current_time_iso
-                ))
-            else:
-                cursor.execute(f'''
-                    INSERT OR REPLACE INTO multi_resolution_bars (
-                        timestamp, exchange, resolution, token, symbol,
-                        open_price, high_price, low_price, close_price,
-                        volume, oi, oi_change, vwap, trade_count,
-                        spread_avg, imbalance_avg, created_at
-                    ) VALUES ({', '.join([ph]*17)})
-                ''', (
-                    timestamp_iso, exchange, resolution, token, symbol,
-                    open_price, high_price, low_price, close_price,
-                    volume, oi, oi_change, vwap, trade_count,
-                    spread_avg, imbalance_avg, current_time_iso
-                ))
+                    spread_avg, imbalance_avg, created_at
+                ) VALUES ({', '.join([ph]*17)})
+                ON CONFLICT (timestamp, exchange, resolution, token)
+                DO UPDATE SET
+                    open_price = EXCLUDED.open_price,
+                    high_price = EXCLUDED.high_price,
+                    low_price = EXCLUDED.low_price,
+                    close_price = EXCLUDED.close_price,
+                    volume = EXCLUDED.volume,
+                    oi = EXCLUDED.oi,
+                    oi_change = EXCLUDED.oi_change,
+                    vwap = EXCLUDED.vwap,
+                    trade_count = EXCLUDED.trade_count,
+                    spread_avg = EXCLUDED.spread_avg,
+                    imbalance_avg = EXCLUDED.imbalance_avg,
+                    created_at = EXCLUDED.created_at
+            ''', (
+                timestamp_iso, exchange, resolution, token, symbol,
+                open_price, high_price, low_price, close_price,
+                volume, oi, oi_change, vwap, trade_count,
+                spread_avg, imbalance_avg, current_time_iso
+            ))
             
             conn.commit()
             release_db_connection(conn)

@@ -76,8 +76,34 @@ class AutoExecutor:
         # Initialize RL Executor
         self.rl_executor: Optional[RLExecutor] = None
         if self.config.use_rl_execution and RL_EXECUTION_AVAILABLE:
-            self.rl_executor = RLExecutor(exchange, self.config.rl_model_path)
-            LOGGER.info(f"[{exchange}] RL Executor initialized: {self.rl_executor.is_ready}")
+            # Import config to get RL settings
+            from config import get_config
+            config = get_config()
+            
+            # Determine if we should use ensemble
+            algorithm = getattr(config, 'rl_algorithm', 'PPO')
+            use_ensemble = getattr(config, 'rl_use_ensemble', False) or algorithm.upper() == "ENSEMBLE"
+            
+            if use_ensemble:
+                # Load both PPO and DQN models for ensemble
+                self.rl_executor = RLExecutor(
+                    exchange,
+                    use_ensemble=True,
+                    ppo_model_path=getattr(config, 'rl_ppo_model_path', None),
+                    dqn_model_path=getattr(config, 'rl_dqn_model_path', None),
+                )
+                algorithm_str = 'ENSEMBLE'
+            else:
+                # Single algorithm mode
+                model_path = self.config.rl_model_path
+                self.rl_executor = RLExecutor(
+                    exchange,
+                    model_path=model_path,
+                    algorithm=algorithm,
+                )
+                algorithm_str = algorithm
+            
+            LOGGER.info(f"[{exchange}] RL Executor initialized: {self.rl_executor.is_ready} (algorithm: {algorithm_str})")
     
     def _record_paper_trade_metric(
         self,
@@ -469,7 +495,11 @@ class AutoExecutor:
                  spread=spread,
                  imbalance=imbalance
              )
-             LOGGER.debug(f"[{self.exchange}] RL Execution: Offset={rl_placement.price_offset:.2f}, Agg={rl_placement.aggression}")
+             LOGGER.info(
+                 f"[{self.exchange}] RL Execution Used: Symbol={symbol}, "
+                 f"Offset={rl_placement.price_offset:.3f}, Aggression={rl_placement.aggression}, "
+                 f"FillProb={rl_placement.fill_probability_est:.2f}"
+             )
 
         if rl_placement:
             # Use RL decision

@@ -9,6 +9,7 @@ This module implements the advanced feature set outlined in claud.md, including:
 """
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -19,9 +20,14 @@ from scipy.stats import skew
 
 from time_utils import to_ist, now_ist
 from sentiment_analyzer import SentimentAnalyzer
+import logging
 
 # Global Sentiment Analyzer instance (lazy initialization or reused)
 _SENTIMENT_ANALYZER = None
+
+# NSE Option Chain Cache (module-level)
+_nse_option_chain_cache: Dict[float, Tuple[Dict, datetime]] = {}
+_cache_timeout_seconds = 30  # Cache for 30 seconds
 
 def get_sentiment_analyzer():
     global _SENTIMENT_ANALYZER
@@ -44,6 +50,13 @@ REQUIRED_FEATURE_COLUMNS = [
     'ce_volume_to_oi_ratio', 'pe_volume_to_oi_ratio',
     'ce_oi_spike', 'pe_oi_spike',
     'avg_ce_iv', 'avg_pe_iv', 'atm_iv', 'otm_pe_avg_iv',
+    # IV Change Features (for RL - sudden IV inclines on strikes)
+    'atm_iv_change_3m', 'atm_iv_change_5m', 'atm_iv_change_15m',
+    'atm_iv_spike', 'iv_incline_intensity', 'iv_momentum',
+    'itm_ce_iv_change_3m', 'itm_pe_iv_change_3m',
+    'iv_spike_strikes_count', 'iv_incline_direction',
+    # Max IV % away from ATM (captures IV skew in wings)
+    'max_iv_pct_away_from_atm', 'max_iv_strike_distance',
     'bid_ask_spread', 'order_book_imbalance',
     'ce_pct_change_3m', 'pe_pct_change_3m',
     'ce_oi_momentum_5', 'ce_oi_momentum_10', 'ce_oi_momentum_20',
@@ -89,6 +102,15 @@ REQUIRED_FEATURE_COLUMNS = [
     'sentiment_fii_net_crores',
     'sentiment_dii_net_crores',
     'sentiment_inst_net_crores',
+    'oi_next_sentiment',  # NSE Option Chain Sentiment
+    # NSE Option Chain Features
+    'nse_next_oi_call_total',
+    'nse_next_oi_put_total',
+    'nse_next_oi_change_call_total',
+    'nse_next_oi_change_put_total',
+    'nse_next_volume_call_total',
+    'nse_next_volume_put_total',
+    'nse_next_oi_change_diff_put_call',
     # Volume Acceleration Features (Momentum Exhaustion Detection)
     'volume_velocity',
     'volume_acceleration',
@@ -146,6 +168,194 @@ def _calculate_depth_metrics(call_options: List[Dict], put_options: List[Dict]) 
     total = max(buy_total + sell_total, 1e-6)
     imbalance = (buy_total - sell_total) / total
     return buy_total, sell_total, imbalance
+
+
+def _calculate_nearest_atm_strike(open_price: float, strike_difference: int) -> float:
+    """
+    Calculate the nearest ATM strike price based on open price.
+    
+    Args:
+        open_price: Market open price of the underlying
+        strike_difference: Strike difference from config (e.g., 50 for NIFTY, 100 for BANKNIFTY)
+    
+    Returns:
+        Nearest ATM strike price rounded to nearest strike_difference
+    """
+    # Round to nearest strike_difference
+    nearest_strike = round(open_price / strike_difference) * strike_difference
+    return nearest_strike
+
+
+def _get_cached_nse_data(strike: float) -> Optional[Dict]:
+    """Get cached NSE option chain data if available and fresh."""
+    global _nse_option_chain_cache
+    
+    if strike in _nse_option_chain_cache:
+        data, cached_time = _nse_option_chain_cache[strike]
+        if datetime.now() - cached_time < timedelta(seconds=_cache_timeout_seconds):
+            return data
+    
+    return None
+
+
+def _cache_nse_data(strike: float, data: Dict):
+    """Cache NSE option chain data with timestamp."""
+    global _nse_option_chain_cache
+    _nse_option_chain_cache[strike] = (data, datetime.now())
+
+
+def _fetch_nse_option_chain_data(strike: float) -> Optional[Dict]:
+    """
+    Fetch option chain data from NSE API for a given strike price.
+    
+    Args:
+        strike: Strike price to fetch data for (e.g., 25950.00)
+    
+    Returns:
+        Dictionary containing option chain data or None if fetch fails
+    """
+    try:
+        import requests
+        from time import sleep
+        
+        # Format strike with comma as thousand separator
+        url = f"https://www.nseindia.com/api/option-chain-v3?type=Indices&symbol=NIFTY&strike={strike:,.2f}"
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.nseindia.com/option-chain",
+            "X-Requested-With": "XMLHttpRequest"
+        }
+        
+        # First, establish a session by visiting the main page
+        session = requests.Session()
+        session.get("https://www.nseindia.com/option-chain", headers=headers, timeout=10)
+        sleep(0.5)  # Small delay to avoid rate limiting
+        
+        # Now fetch the option chain data
+        response = session.get(url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            logging.warning(f"NSE API returned status {response.status_code} for strike {strike}")
+            return None
+    except Exception as e:
+        logging.error(f"Error fetching NSE option chain data for strike {strike}: {e}")
+        return None
+
+
+def _parse_nse_option_chain_data(option_chain_data: Dict) -> Dict[str, float]:
+    """
+    Parse NSE option chain JSON response and aggregate OI, Change in OI, and Volume.
+    
+    Args:
+        option_chain_data: Raw JSON response from NSE API
+    
+    Returns:
+        Dictionary with aggregated metrics:
+        - total_oi_call
+        - total_oi_put
+        - total_oi_change_call
+        - total_oi_change_put
+        - total_volume_call
+        - total_volume_put
+        - oi_change_diff_put_call
+    """
+    try:
+        # Navigate through the JSON structure
+        # Based on typical NSE API response structure:
+        # data['records']['data'] contains array of strike data
+        records = option_chain_data.get('records', {})
+        data = records.get('data', [])
+        
+        total_oi_call = 0.0
+        total_oi_put = 0.0
+        total_oi_change_call = 0.0
+        total_oi_change_put = 0.0
+        total_volume_call = 0.0
+        total_volume_put = 0.0
+        
+        for strike_data in data:
+            # Extract CALL option data
+            ce_data = strike_data.get('CE', {})
+            if ce_data:
+                total_oi_call += float(ce_data.get('openInterest', 0) or 0)
+                total_oi_change_call += float(ce_data.get('changeinOpenInterest', 0) or 0)
+                total_volume_call += float(ce_data.get('totalTradedVolume', 0) or 0)
+            
+            # Extract PUT option data
+            pe_data = strike_data.get('PE', {})
+            if pe_data:
+                total_oi_put += float(pe_data.get('openInterest', 0) or 0)
+                total_oi_change_put += float(pe_data.get('changeinOpenInterest', 0) or 0)
+                total_volume_put += float(pe_data.get('totalTradedVolume', 0) or 0)
+        
+        # Calculate difference: PUT - CALL
+        oi_change_diff_put_call = total_oi_change_put - total_oi_change_call
+        
+        return {
+            'total_oi_call': total_oi_call,
+            'total_oi_put': total_oi_put,
+            'total_oi_change_call': total_oi_change_call,
+            'total_oi_change_put': total_oi_change_put,
+            'total_volume_call': total_volume_call,
+            'total_volume_put': total_volume_put,
+            'oi_change_diff_put_call': oi_change_diff_put_call
+        }
+    except Exception as e:
+        logging.error(f"Error parsing NSE option chain data: {e}", exc_info=True)
+        # Return zeros if parsing fails
+        return {
+            'total_oi_call': 0.0,
+            'total_oi_put': 0.0,
+            'total_oi_change_call': 0.0,
+            'total_oi_change_put': 0.0,
+            'total_volume_call': 0.0,
+            'total_volume_put': 0.0,
+            'oi_change_diff_put_call': 0.0
+        }
+
+
+def _get_market_open_price(handler) -> Optional[float]:
+    """
+    Get the market open price from handler's data reels.
+    
+    Args:
+        handler: ExchangeDataHandler instance
+    
+    Returns:
+        Open price for the current trading session or None if not available
+    """
+    try:
+        if handler.underlying_token is None:
+            return None
+        
+        # Get the first bar of the current session from data reels
+        data_reel = handler.data_reels.get(handler.underlying_token)
+        if not data_reel or len(data_reel) == 0:
+            return None
+        
+        # The first entry in the reel should have the open price
+        # Or we can get it from the first minute bar
+        first_bar = data_reel[0] if len(data_reel) > 0 else None
+        
+        if first_bar:
+            # Check if it has open_price field
+            if 'open_price' in first_bar:
+                return float(first_bar['open_price'])
+            # Fallback: use the first LTP as open price
+            elif 'ltp' in first_bar:
+                return float(first_bar['ltp'])
+        
+        # Alternative: Get from latest_oi_data if available
+        # (though this might be current price, not open)
+        return None
+    except Exception as e:
+        logging.error(f"Error getting market open price: {e}")
+        return None
 
 
 def engineer_live_feature_set(
@@ -246,6 +456,19 @@ def engineer_live_feature_set(
         'atm_iv': option_aggs.atm_iv,
         'otm_pe_avg_iv': option_aggs.otm_pe_avg_iv,
     }
+    
+    # IV Change Features (for RL - sudden IV inclines on strikes)
+    # These features capture IV momentum and spikes that drive market direction
+    iv_change_features = _calculate_iv_change_features(
+        handler, call_options, put_options, atm_strike, spot_price
+    )
+    features.update(iv_change_features)
+    
+    # Max IV % away from ATM (captures IV skew in wings)
+    max_iv_features = _calculate_max_iv_away_from_atm(
+        call_options, put_options, option_aggs.atm_iv
+    )
+    features.update(max_iv_features)
 
     # Enhanced features
     features['order_flow_toxicity'] = vpin_feature
@@ -376,6 +599,76 @@ def engineer_live_feature_set(
 
     # 4. Net Flow Direction: +ve = bear pressure (CE adds / PE leaves), -ve = bull pressure
     features['itm_oi_flow_direction'] = itm_ce_change - itm_pe_change
+
+    # NSE Option Chain Features (based on ATM strike from open price)
+    try:
+        # Get market open price
+        open_price = _get_market_open_price(handler)
+        
+        if open_price is not None:
+            # Calculate nearest ATM strike
+            strike_difference = handler.config.get('strike_difference', 50)
+            atm_strike = _calculate_nearest_atm_strike(open_price, strike_difference)
+            
+            # Fetch NSE option chain data (with caching)
+            option_chain_data = _get_cached_nse_data(atm_strike)
+            if option_chain_data is None:
+                option_chain_data = _fetch_nse_option_chain_data(atm_strike)
+                if option_chain_data:
+                    _cache_nse_data(atm_strike, option_chain_data)
+            
+            if option_chain_data:
+                # Parse and aggregate the data
+                nse_metrics = _parse_nse_option_chain_data(option_chain_data)
+                
+                # Add to features with prefix 'nse_next_'
+                features['nse_next_oi_call_total'] = nse_metrics['total_oi_call']
+                features['nse_next_oi_put_total'] = nse_metrics['total_oi_put']
+                features['nse_next_oi_change_call_total'] = nse_metrics['total_oi_change_call']
+                features['nse_next_oi_change_put_total'] = nse_metrics['total_oi_change_put']
+                features['nse_next_volume_call_total'] = nse_metrics['total_volume_call']
+                features['nse_next_volume_put_total'] = nse_metrics['total_volume_put']
+                features['nse_next_oi_change_diff_put_call'] = nse_metrics['oi_change_diff_put_call']
+                
+                # Add sentiment feature (same value as the difference) - placed in Sentiment section
+                features['oi_next_sentiment'] = nse_metrics['oi_change_diff_put_call']
+            else:
+                # Set to zero if fetch failed
+                features.update({
+                    'nse_next_oi_call_total': 0.0,
+                    'nse_next_oi_put_total': 0.0,
+                    'nse_next_oi_change_call_total': 0.0,
+                    'nse_next_oi_change_put_total': 0.0,
+                    'nse_next_volume_call_total': 0.0,
+                    'nse_next_volume_put_total': 0.0,
+                    'nse_next_oi_change_diff_put_call': 0.0,
+                    'oi_next_sentiment': 0.0
+                })
+        else:
+            # Set to zero if open price not available
+            features.update({
+                'nse_next_oi_call_total': 0.0,
+                'nse_next_oi_put_total': 0.0,
+                'nse_next_oi_change_call_total': 0.0,
+                'nse_next_oi_change_put_total': 0.0,
+                'nse_next_volume_call_total': 0.0,
+                'nse_next_volume_put_total': 0.0,
+                'nse_next_oi_change_diff_put_call': 0.0,
+                'oi_next_sentiment': 0.0
+            })
+    except Exception as e:
+        logging.error(f"Error calculating NSE option chain features: {e}", exc_info=True)
+        # Set to zero on error
+        features.update({
+            'nse_next_oi_call_total': 0.0,
+            'nse_next_oi_put_total': 0.0,
+            'nse_next_oi_change_call_total': 0.0,
+            'nse_next_oi_change_put_total': 0.0,
+            'nse_next_volume_call_total': 0.0,
+            'nse_next_volume_put_total': 0.0,
+            'nse_next_oi_change_diff_put_call': 0.0,
+            'oi_next_sentiment': 0.0
+        })
 
     # Final sanitation + ensure no NaNs
     sanitized = {k: _sanitize_float(v) for k, v in features.items()}
@@ -910,6 +1203,268 @@ def _safe_mean(values: Iterable[float]) -> float:
 
 def _safe_ratio(numerator: float, denominator: float) -> float:
     return numerator / denominator if denominator else 0.0
+
+
+def _calculate_iv_change_features(
+    handler,
+    call_options: List[Dict],
+    put_options: List[Dict],
+    atm_strike: float,
+    spot_price: float
+) -> Dict[str, float]:
+    """
+    Calculate IV change features that capture sudden IV inclines on strike prices.
+    
+    These features are critical for RL model to detect IV-driven market direction changes.
+    
+    Returns:
+        Dictionary of IV change features
+    """
+    features = {
+        'atm_iv_change_3m': 0.0,
+        'atm_iv_change_5m': 0.0,
+        'atm_iv_change_15m': 0.0,
+        'atm_iv_spike': 0.0,
+        'iv_incline_intensity': 0.0,
+        'iv_momentum': 0.0,
+        'itm_ce_iv_change_3m': 0.0,
+        'itm_pe_iv_change_3m': 0.0,
+        'iv_spike_strikes_count': 0.0,
+        'iv_incline_direction': 0.0,
+    }
+    
+    try:
+        # Get current IV values from handler cache
+        iv_cache = getattr(handler, 'option_iv_cache', {})
+        if not iv_cache:
+            return features
+        
+        # Find ATM options (closest to ATM strike)
+        atm_call_iv = None
+        atm_put_iv = None
+        atm_call_token = None
+        atm_put_token = None
+        
+        min_call_dist = float('inf')
+        min_put_dist = float('inf')
+        
+        for opt in call_options:
+            strike = opt.get('strike', 0)
+            if strike == 0:
+                continue
+            dist = abs(strike - atm_strike)
+            if dist < min_call_dist:
+                min_call_dist = dist
+                token = opt.get('instrument_token')
+                if token and token in iv_cache:
+                    atm_call_iv = iv_cache[token]
+                    atm_call_token = token
+        
+        for opt in put_options:
+            strike = opt.get('strike', 0)
+            if strike == 0:
+                continue
+            dist = abs(strike - atm_strike)
+            if dist < min_put_dist:
+                min_put_dist = dist
+                token = opt.get('instrument_token')
+                if token and token in iv_cache:
+                    atm_put_iv = iv_cache[token]
+                    atm_put_token = token
+        
+        # Use average of call and put ATM IV, or whichever is available
+        current_atm_iv = None
+        if atm_call_iv is not None and atm_put_iv is not None:
+            current_atm_iv = (atm_call_iv + atm_put_iv) / 2.0
+        elif atm_call_iv is not None:
+            current_atm_iv = atm_call_iv
+        elif atm_put_iv is not None:
+            current_atm_iv = atm_put_iv
+        
+        if current_atm_iv is None:
+            return features
+        
+        # Initialize IV history tracking if not exists
+        if not hasattr(handler, '_iv_history_window'):
+            handler._iv_history_window = {}
+        
+        # Store current IV in history
+        for token in [atm_call_token, atm_put_token]:
+            if token and token in iv_cache:
+                if token not in handler._iv_history_window:
+                    handler._iv_history_window[token] = deque(maxlen=20)  # Keep last 20 minutes
+                handler._iv_history_window[token].append({
+                    'iv': iv_cache[token],
+                    'timestamp': now_ist()
+                })
+        
+        # Calculate IV changes for ATM
+        if atm_call_token and atm_call_token in handler._iv_history_window:
+            iv_window = handler._iv_history_window[atm_call_token]
+            if len(iv_window) >= 3:
+                current_iv = iv_window[-1]['iv']
+                iv_3m = iv_window[-3]['iv'] if len(iv_window) >= 3 else current_iv
+                iv_5m = iv_window[-5]['iv'] if len(iv_window) >= 5 else current_iv
+                iv_15m = iv_window[-15]['iv'] if len(iv_window) >= 15 else current_iv
+                
+                if iv_3m > 0:
+                    features['atm_iv_change_3m'] = ((current_iv - iv_3m) / iv_3m) * 100.0
+                if iv_5m > 0:
+                    features['atm_iv_change_5m'] = ((current_iv - iv_5m) / iv_5m) * 100.0
+                if iv_15m > 0:
+                    features['atm_iv_change_15m'] = ((current_iv - iv_15m) / iv_15m) * 100.0
+                
+                # IV Spike: sudden large increase (>5% in 3 minutes)
+                if features['atm_iv_change_3m'] > 5.0:
+                    features['atm_iv_spike'] = features['atm_iv_change_3m']
+                
+                # IV Momentum: rate of change
+                if len(iv_window) >= 2:
+                    iv_momentum_raw = (iv_window[-1]['iv'] - iv_window[-2]['iv']) / max(iv_window[-2]['iv'], 0.01)
+                    features['iv_momentum'] = iv_momentum_raw * 100.0
+        
+        # Calculate IV incline intensity (weighted by OI)
+        # Higher OI strikes with IV increases are more significant
+        iv_incline_sum = 0.0
+        iv_spike_count = 0
+        total_weight = 0.0
+        
+        for opt in call_options + put_options:
+            token = opt.get('instrument_token')
+            if not token or token not in iv_cache:
+                continue
+            
+            current_iv = iv_cache[token]
+            oi = float(opt.get('latest_oi', 0) or 0)
+            strike = opt.get('strike', 0)
+            
+            # Weight by OI and proximity to ATM
+            dist_from_atm = abs(strike - atm_strike) if atm_strike > 0 else 0
+            proximity_weight = 1.0 / (1.0 + dist_from_atm / 50.0)  # Decay with distance
+            weight = oi * proximity_weight
+            
+            # Check for IV increase in history
+            if token in handler._iv_history_window:
+                iv_window = handler._iv_history_window[token]
+                if len(iv_window) >= 3:
+                    iv_3m_ago = iv_window[-3]['iv']
+                    if iv_3m_ago > 0:
+                        iv_change_pct = ((current_iv - iv_3m_ago) / iv_3m_ago) * 100.0
+                        if iv_change_pct > 0:  # Only count increases
+                            iv_incline_sum += iv_change_pct * weight
+                            total_weight += weight
+                            
+                            # Count spikes (>5% increase)
+                            if iv_change_pct > 5.0:
+                                iv_spike_count += 1
+        
+        if total_weight > 0:
+            features['iv_incline_intensity'] = iv_incline_sum / total_weight
+        features['iv_spike_strikes_count'] = float(iv_spike_count)
+        
+        # IV Incline Direction: positive = bullish (CE IV up), negative = bearish (PE IV up)
+        itm_ce_iv_change = 0.0
+        itm_pe_iv_change = 0.0
+        itm_ce_count = 0
+        itm_pe_count = 0
+        
+        for opt in call_options:
+            if _is_itm(opt, 'ce'):
+                token = opt.get('instrument_token')
+                if token and token in handler._iv_history_window:
+                    iv_window = handler._iv_history_window[token]
+                    if len(iv_window) >= 3:
+                        iv_change = ((iv_window[-1]['iv'] - iv_window[-3]['iv']) / max(iv_window[-3]['iv'], 0.01)) * 100.0
+                        itm_ce_iv_change += iv_change
+                        itm_ce_count += 1
+        
+        for opt in put_options:
+            if _is_itm(opt, 'pe'):
+                token = opt.get('instrument_token')
+                if token and token in handler._iv_history_window:
+                    iv_window = handler._iv_history_window[token]
+                    if len(iv_window) >= 3:
+                        iv_change = ((iv_window[-1]['iv'] - iv_window[-3]['iv']) / max(iv_window[-3]['iv'], 0.01)) * 100.0
+                        itm_pe_iv_change += iv_change
+                        itm_pe_count += 1
+        
+        if itm_ce_count > 0:
+            features['itm_ce_iv_change_3m'] = itm_ce_iv_change / itm_ce_count
+        if itm_pe_count > 0:
+            features['itm_pe_iv_change_3m'] = itm_pe_iv_change / itm_pe_count
+        
+        # Direction: positive = CE IV rising (bearish), negative = PE IV rising (bullish)
+        features['iv_incline_direction'] = features['itm_ce_iv_change_3m'] - features['itm_pe_iv_change_3m']
+        
+    except Exception as e:
+        import logging
+        logging.debug(f"Error calculating IV change features: {e}")
+    
+    return features
+
+
+def _calculate_max_iv_away_from_atm(
+    call_options: List[Dict],
+    put_options: List[Dict],
+    atm_iv: float
+) -> Dict[str, float]:
+    """
+    Calculate the maximum IV percentage away from ATM strike prices.
+    
+    This feature captures IV skew in the wings (far OTM strikes) which can indicate:
+    - Fear/greed in the market (high OTM put IV = fear)
+    - Potential volatility expansion
+    - Market direction bias
+    
+    Args:
+        call_options: List of call option dictionaries
+        put_options: List of put option dictionaries
+        atm_iv: ATM implied volatility value
+    
+    Returns:
+        Dictionary with:
+        - max_iv_pct_away_from_atm: Percentage difference between max IV (away from ATM) and ATM IV
+        - max_iv_strike_distance: Number of strikes away where max IV occurs
+    """
+    features = {
+        'max_iv_pct_away_from_atm': 0.0,
+        'max_iv_strike_distance': 0.0,
+    }
+    
+    if not atm_iv or atm_iv <= 0:
+        return features
+    
+    try:
+        max_iv = 0.0
+        max_iv_distance = 0.0
+        
+        # Consider strikes that are at least 2 strikes away from ATM
+        # This focuses on "wings" where IV skew is most pronounced
+        min_distance = 2
+        
+        # Check all call and put options
+        for opt in call_options + put_options:
+            position = abs(opt.get('position', 0))
+            iv = opt.get('iv')
+            
+            # Only consider strikes away from ATM (at least min_distance away)
+            if position >= min_distance and iv is not None:
+                iv_value = float(iv)
+                if iv_value > max_iv:
+                    max_iv = iv_value
+                    max_iv_distance = position
+        
+        # Calculate percentage difference from ATM IV
+        if max_iv > 0:
+            pct_diff = ((max_iv - atm_iv) / atm_iv) * 100.0
+            features['max_iv_pct_away_from_atm'] = pct_diff
+            features['max_iv_strike_distance'] = max_iv_distance
+        
+    except Exception as e:
+        import logging
+        logging.debug(f"Error calculating max IV away from ATM: {e}")
+    
+    return features
 
 
 def _safe_div(numerator: float, denominator: float, fallback: float = 0.0, min_denominator: float = 1.0) -> float:

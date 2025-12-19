@@ -86,6 +86,7 @@ class RegimeHMMTransformer(BaseEstimator, TransformerMixin):
         self.n_iter = n_iter
         self.random_state = random_state
         self.model = None
+        self.scaler = None
         self.valid_ = False
 
     def fit(self, X, y=None):
@@ -106,22 +107,64 @@ class RegimeHMMTransformer(BaseEstimator, TransformerMixin):
 
         X_regime = X_regime.ffill().fillna(0.0)
         
-        # Add small jitter to prevent singular covariance matrices
-        # This is critical when some features might be constant or highly correlated
-        jitter = np.random.normal(0, 1e-6, X_regime.shape)
-        X_regime = X_regime + jitter
-
-        self.model = hmm.GaussianHMM(
-            n_components=self.n_components,
-            covariance_type="full",
-            n_iter=self.n_iter,
-            random_state=self.random_state,
-            init_params="stmc",
-            min_covar=1e-4  # Ensure non-zero variance
+        # Remove constant features (zero variance) that cause covariance issues
+        feature_vars = X_regime.var()
+        constant_features = feature_vars[feature_vars < 1e-8].index.tolist()
+        if constant_features:
+            logging.debug(f"Removing constant features for HMM: {constant_features}")
+            X_regime = X_regime.drop(columns=constant_features)
+        
+        # Check if we have enough features left
+        if X_regime.shape[1] < 2:
+            logging.warning("HMM: Insufficient features after removing constants. Defaulting to single regime.")
+            self.valid_ = False
+            return self
+        
+        # Standardize features to prevent covariance issues
+        from sklearn.preprocessing import StandardScaler
+        self.scaler = StandardScaler()
+        X_regime_scaled = pd.DataFrame(
+            self.scaler.fit_transform(X_regime),
+            columns=X_regime.columns,
+            index=X_regime.index
         )
+        
+        # Add small regularization jitter to prevent singular covariance matrices
+        # This is critical when some features might be highly correlated
+        np.random.seed(self.random_state)
+        jitter = np.random.normal(0, 1e-5, X_regime_scaled.shape)
+        X_regime_scaled = X_regime_scaled + jitter
+
+        # Use 'diag' covariance type for more stability, or 'full' with better regularization
         try:
-            self.model.fit(X_regime)
+            self.model = hmm.GaussianHMM(
+                n_components=self.n_components,
+                covariance_type="full",  # Try full first
+                n_iter=self.n_iter,
+                random_state=self.random_state,
+                init_params="stmc",
+                min_covar=1e-3  # Increased from 1e-4 for better regularization
+            )
+            self.model.fit(X_regime_scaled.values)
             self.valid_ = True
+        except (ValueError, np.linalg.LinAlgError) as e:
+            # If full covariance fails, try diagonal (more stable but less expressive)
+            logging.debug(f"HMM full covariance failed: {e}. Trying diagonal covariance...")
+            try:
+                self.model = hmm.GaussianHMM(
+                    n_components=self.n_components,
+                    covariance_type="diag",  # Diagonal is more stable
+                    n_iter=self.n_iter,
+                    random_state=self.random_state,
+                    init_params="stmc",
+                    min_covar=1e-3
+                )
+                self.model.fit(X_regime_scaled.values)
+                self.valid_ = True
+                logging.info("HMM fitted successfully with diagonal covariance")
+            except Exception as e2:
+                logging.warning(f"HMM Fit failed with both full and diagonal covariance: {e2}. Defaulting to single regime.")
+                self.valid_ = False
         except Exception as e:
             logging.warning(f"HMM Fit failed: {e}. Defaulting to single regime.")
             self.valid_ = False
@@ -143,10 +186,28 @@ class RegimeHMMTransformer(BaseEstimator, TransformerMixin):
             raise ValueError("Input must be DataFrame")
             
         X_regime = X_regime.ffill().fillna(0.0)
+        
+        # Remove the same constant features that were removed during fit
+        if hasattr(self, 'scaler'):
+            # Remove constant features if they exist
+            feature_vars = X_regime.var()
+            constant_features = feature_vars[feature_vars < 1e-8].index.tolist()
+            if constant_features:
+                X_regime = X_regime.drop(columns=constant_features)
+            
+            # Standardize using the same scaler from fit
+            X_regime_scaled = pd.DataFrame(
+                self.scaler.transform(X_regime),
+                columns=X_regime.columns,
+                index=X_regime.index
+            )
+            X_regime = X_regime_scaled
+        
         try:
-            hidden_states = self.model.predict(X_regime)
+            hidden_states = self.model.predict(X_regime.values)
             return hidden_states.reshape(-1, 1)
-        except Exception:
+        except Exception as e:
+            logging.debug(f"HMM prediction failed: {e}. Returning zeros.")
             return np.zeros((len(X), 1))
 
 def define_triple_barrier_target(

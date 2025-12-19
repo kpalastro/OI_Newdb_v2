@@ -79,13 +79,25 @@ class MultiHorizonEnsemble:
         
         # 2. Load Transformer weights (PyTorch)
         transformer_path = model_dir / "expiry_transformer.pt"
-        if transformer_path.exists() and self.expiry_model is not None and torch is not None:
+        if transformer_path.exists() and torch is not None:
             try:
                 state_dict = torch.load(transformer_path, map_location='cpu')
-                self.expiry_model.load_state_dict(state_dict)
-                self.expiry_model.eval()  # Set to evaluation mode
-                LOGGER.info(f"✓ Loaded Transformer weights from {transformer_path}")
-                loaded_count += 1
+                # Detect feature dimension from saved weights
+                if 'embedding.weight' in state_dict:
+                    feature_dim = state_dict['embedding.weight'].shape[1]
+                    # Re-initialize model with correct feature dimension if needed
+                    if self.expiry_model is None:
+                        LOGGER.info(f"Initializing ExpiryDayTransformer with feature_dim={feature_dim}")
+                        self.expiry_model = ExpiryDayTransformer(feature_dim=feature_dim)
+                    elif self.expiry_model.embedding.weight.shape[1] != feature_dim:
+                        LOGGER.info(f"Re-initializing ExpiryDayTransformer with feature_dim={feature_dim} (was {self.expiry_model.embedding.weight.shape[1]})")
+                        self.expiry_model = ExpiryDayTransformer(feature_dim=feature_dim)
+                    self.expiry_model.load_state_dict(state_dict)
+                    self.expiry_model.eval()  # Set to evaluation mode
+                    LOGGER.info(f"✓ Loaded Transformer weights from {transformer_path}")
+                    loaded_count += 1
+                else:
+                    LOGGER.warning(f"Transformer state_dict missing 'embedding.weight'")
             except Exception as e:
                 LOGGER.warning(f"Failed to load Transformer weights: {e}")
         
