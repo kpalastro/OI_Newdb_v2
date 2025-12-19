@@ -23,6 +23,7 @@ ENV/
 logs/
 build/
 dist/
+
 trade_logs/
 metrics/phase2_metrics/
 metrics/rl_contribution_report.json
@@ -30,6 +31,7 @@ state/reels_snapshot.pkl
 
 models/NSE/
 models/BSE/
+models/rl_*.zip
 *.egg-info/
 
 # IDE
