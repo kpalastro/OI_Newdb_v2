@@ -1,0 +1,739 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multi-Expiry Analytics Dashboard</title>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+            color: #e2e8f0;
+            padding: 20px;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .header h1 {
+            color: #60a5fa;
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+        }
+        .controls {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            justify-content: center;
+            background: rgba(30, 41, 59, 0.8);
+            padding: 20px;
+            border-radius: 10px;
+        }
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        .control-group label {
+            font-size: 0.9rem;
+            color: #94a3b8;
+        }
+        .control-group select,
+        .control-group input {
+            padding: 8px 12px;
+            border: 1px solid #475569;
+            border-radius: 5px;
+            background: #1e293b;
+            color: #e2e8f0;
+            font-size: 1rem;
+        }
+        .control-group select:focus,
+        .control-group input:focus {
+            outline: none;
+            border-color: #60a5fa;
+        }
+        button {
+            padding: 10px 20px;
+            background: #3b82f6;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 1rem;
+            font-weight: 600;
+            transition: background 0.3s;
+        }
+        button:hover {
+            background: #2563eb;
+        }
+        button:disabled {
+            background: #475569;
+            cursor: not-allowed;
+        }
+        .status {
+            text-align: center;
+            padding: 10px;
+            margin-bottom: 20px;
+            border-radius: 5px;
+            font-weight: 600;
+        }
+        .status.loading {
+            background: rgba(59, 130, 246, 0.2);
+            color: #60a5fa;
+        }
+        .status.error {
+            background: rgba(239, 68, 68, 0.2);
+            color: #f87171;
+        }
+        .status.success {
+            background: rgba(34, 197, 94, 0.2);
+            color: #4ade80;
+        }
+        .chart-container {
+            background: rgba(30, 41, 59, 0.8);
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+        .chart-title {
+            font-size: 1.3rem;
+            font-weight: 600;
+            margin-bottom: 15px;
+            color: #60a5fa;
+            border-bottom: 2px solid #475569;
+            padding-bottom: 10px;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(600px, 1fr));
+            gap: 20px;
+        }
+        .summary-cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .summary-card {
+            background: rgba(30, 41, 59, 0.8);
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+        }
+        .summary-card .label {
+            font-size: 0.9rem;
+            color: #94a3b8;
+            margin-bottom: 8px;
+        }
+        .summary-card .value {
+            font-size: 1.8rem;
+            font-weight: 700;
+        }
+        .summary-card.bullish .value {
+            color: #4ade80;
+        }
+        .summary-card.bearish .value {
+            color: #f87171;
+        }
+        .summary-card.neutral .value {
+            color: #94a3b8;
+        }
+        .turning-points-list {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .turning-point-item {
+            background: rgba(51, 65, 85, 0.6);
+            padding: 10px;
+            margin-bottom: 8px;
+            border-radius: 5px;
+            border-left: 4px solid;
+        }
+        .turning-point-item.bullish {
+            border-left-color: #4ade80;
+        }
+        .turning-point-item.bearish {
+            border-left-color: #f87171;
+        }
+        .turning-point-item .time {
+            font-weight: 600;
+            color: #60a5fa;
+        }
+        .turning-point-item .signal {
+            margin-top: 5px;
+            font-size: 0.9rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>📊 Multi-Expiry Analytics Dashboard</h1>
+        <p>Visualize Option Chain Sentiment, Trends, and Turning Points</p>
+    </div>
+
+    <div class="controls">
+        <div class="control-group">
+            <label for="exchange">Exchange</label>
+            <select id="exchange">
+                <option value="NSE" selected>NSE</option>
+                <option value="BSE">BSE</option>
+            </select>
+        </div>
+        <div class="control-group">
+            <label for="hours">Hours to Display</label>
+            <select id="hours">
+                <option value="1">Last 1 Hour</option>
+                <option value="4">Last 4 Hours</option>
+                <option value="8" selected>Last 8 Hours</option>
+                <option value="24">Last 24 Hours</option>
+                <option value="48">Last 48 Hours</option>
+            </select>
+        </div>
+        <div class="control-group">
+            <label for="limit">Max Records</label>
+            <select id="limit">
+                <option value="100">100</option>
+                <option value="200" selected>200</option>
+                <option value="500">500</option>
+                <option value="1000">1000</option>
+            </select>
+        </div>
+        <div class="control-group" style="align-self: flex-end;">
+            <button id="refreshBtn" onclick="loadData()">🔄 Refresh Data</button>
+        </div>
+    </div>
+
+    <div id="status" class="status" style="display: none;"></div>
+
+    <div class="summary-cards" id="summaryCards"></div>
+
+    <div class="grid">
+        <div class="chart-container">
+            <div class="chart-title">OI Change Difference (Put - Call) & Sentiment Score</div>
+            <div id="oiSentimentChart" style="height: 400px;"></div>
+        </div>
+
+        <div class="chart-container">
+            <div class="chart-title">Put/Call Ratios</div>
+            <div id="pcRatioChart" style="height: 400px;"></div>
+        </div>
+
+        <div class="chart-container">
+            <div class="chart-title">Moving Averages - Trend Analysis</div>
+            <div id="trendChart" style="height: 400px;"></div>
+        </div>
+
+        <div class="chart-container">
+            <div class="chart-title">Volume Analysis</div>
+            <div id="volumeChart" style="height: 400px;"></div>
+        </div>
+
+        <div class="chart-container">
+            <div class="chart-title">IV Skew & Difference</div>
+            <div id="ivChart" style="height: 400px;"></div>
+        </div>
+
+        <div class="chart-container">
+            <div class="chart-title">Prediction Signals Over Time</div>
+            <div id="predictionChart" style="height: 400px;"></div>
+        </div>
+    </div>
+
+    <div class="chart-container">
+        <div class="chart-title">Recent Turning Points</div>
+        <div id="turningPoints" class="turning-points-list"></div>
+    </div>
+
+    <script>
+        let currentData = [];
+        let autoRefreshInterval = null;
+
+        function showStatus(message, type) {
+            const statusEl = document.getElementById('status');
+            statusEl.textContent = message;
+            statusEl.className = `status ${type}`;
+            statusEl.style.display = 'block';
+            if (type === 'success') {
+                setTimeout(() => statusEl.style.display = 'none', 3000);
+            }
+        }
+
+        async function loadData() {
+            const exchange = document.getElementById('exchange').value;
+            const hours = parseInt(document.getElementById('hours').value);
+            const limit = parseInt(document.getElementById('limit').value);
+            
+            showStatus('Loading data...', 'loading');
+            document.getElementById('refreshBtn').disabled = true;
+
+            try {
+                const response = await fetch(`/api/multi-expiry-analytics?exchange=${exchange}&hours=${hours}&limit=${limit}`);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const data = await response.json();
+                
+                if (data.error) {
+                    throw new Error(data.error);
+                }
+
+                currentData = data.data || [];
+                
+                if (currentData.length === 0) {
+                    showStatus(`No data available for ${data.exchange || exchange} exchange in the last ${data.time_range_hours || hours} hours. Try selecting NSE or a different time range.`, 'error');
+                    return;
+                }
+
+                updateSummaryCards(currentData);
+                plotOIAndSentiment(currentData);
+                plotPCRatios(currentData);
+                plotTrendAnalysis(currentData);
+                plotVolumeAnalysis(currentData);
+                plotIVAnalysis(currentData);
+                plotPredictionSignals(currentData);
+                updateTurningPoints(currentData);
+
+                showStatus(`Loaded ${currentData.length} records`, 'success');
+            } catch (error) {
+                console.error('Error loading data:', error);
+                showStatus(`Error: ${error.message}`, 'error');
+            } finally {
+                document.getElementById('refreshBtn').disabled = false;
+            }
+        }
+
+        function updateSummaryCards(data) {
+            if (data.length === 0) return;
+            
+            const latest = data[0];
+            const avgSentiment = data.reduce((sum, d) => sum + (d.sentiment_score_oi_change || 50), 0) / data.length;
+            const turningPointsCount = data.filter(d => d.is_turning_point).length;
+            const latestPrediction = latest.prediction_signal || 'NEUTRAL_PREDICT';
+
+            const cardsHtml = `
+                <div class="summary-card ${avgSentiment > 55 ? 'bullish' : avgSentiment < 45 ? 'bearish' : 'neutral'}">
+                    <div class="label">Avg Sentiment Score</div>
+                    <div class="value">${avgSentiment.toFixed(1)}</div>
+                </div>
+                <div class="summary-card">
+                    <div class="label">Latest OI Change Diff</div>
+                    <div class="value" style="color: ${latest.oi_change_diff_put_call > 0 ? '#f87171' : '#4ade80'}">
+                        ${latest.oi_change_diff_put_call?.toLocaleString() || 'N/A'}
+                    </div>
+                </div>
+                <div class="summary-card">
+                    <div class="label">Turning Points</div>
+                    <div class="value">${turningPointsCount}</div>
+                </div>
+                <div class="summary-card ${latestPrediction.includes('BULLISH') ? 'bullish' : latestPrediction.includes('BEARISH') ? 'bearish' : 'neutral'}">
+                    <div class="label">Latest Prediction</div>
+                    <div class="value">${latestPrediction.replace('_', ' ')}</div>
+                </div>
+                <div class="summary-card">
+                    <div class="label">Put/Call OI Ratio</div>
+                    <div class="value">${latest.pc_oi_ratio?.toFixed(3) || 'N/A'}</div>
+                </div>
+                <div class="summary-card">
+                    <div class="label">IV Skew</div>
+                    <div class="value">${latest.iv_skew?.toFixed(3) || 'N/A'}</div>
+                </div>
+            `;
+            document.getElementById('summaryCards').innerHTML = cardsHtml;
+        }
+
+        function plotOIAndSentiment(data) {
+            const timestamps = data.map(d => d.timestamp);
+            const oiChangeDiff = data.map(d => d.oi_change_diff_put_call || 0);
+            const sentimentScore = data.map(d => d.sentiment_score_oi_change || 50);
+
+            const trace1 = {
+                x: timestamps,
+                y: oiChangeDiff,
+                name: 'OI Change Diff (Put - Call)',
+                type: 'scatter',
+                mode: 'lines+markers',
+                line: { color: '#60a5fa', width: 2 },
+                marker: { size: 4 },
+                yaxis: 'y'
+            };
+
+            const trace2 = {
+                x: timestamps,
+                y: sentimentScore,
+                name: 'Sentiment Score (0-100)',
+                type: 'scatter',
+                mode: 'lines',
+                line: { color: '#4ade80', width: 2, dash: 'dash' },
+                yaxis: 'y2'
+            };
+
+            const layout = {
+                title: { text: '', font: { color: '#e2e8f0' } },
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                font: { color: '#e2e8f0' },
+                xaxis: { 
+                    title: 'Time',
+                    gridcolor: '#475569',
+                    zeroline: false
+                },
+                yaxis: {
+                    title: 'OI Change Difference',
+                    side: 'left',
+                    gridcolor: '#475569',
+                    zeroline: true,
+                    zerolinecolor: '#94a3b8'
+                },
+                yaxis2: {
+                    title: 'Sentiment Score',
+                    side: 'right',
+                    overlaying: 'y',
+                    range: [0, 100],
+                    gridcolor: '#475569'
+                },
+                legend: { 
+                    x: 0,
+                    y: 1,
+                    bgcolor: 'rgba(30, 41, 59, 0.8)'
+                },
+                hovermode: 'x unified'
+            };
+
+            Plotly.newPlot('oiSentimentChart', [trace1, trace2], layout, {responsive: true});
+        }
+
+        function plotPCRatios(data) {
+            const timestamps = data.map(d => d.timestamp);
+            const pcOI = data.map(d => d.pc_oi_ratio || 1);
+            const pcVolume = data.map(d => d.pc_volume_ratio || 1);
+
+            const trace1 = {
+                x: timestamps,
+                y: pcOI,
+                name: 'Put/Call OI Ratio',
+                type: 'scatter',
+                mode: 'lines+markers',
+                line: { color: '#f87171', width: 2 },
+                marker: { size: 4 }
+            };
+
+            const trace2 = {
+                x: timestamps,
+                y: pcVolume,
+                name: 'Put/Call Volume Ratio',
+                type: 'scatter',
+                mode: 'lines',
+                line: { color: '#fb923c', width: 2, dash: 'dash' }
+            };
+
+            const trace3 = {
+                x: timestamps,
+                y: Array(timestamps.length).fill(1),
+                name: 'Neutral Line',
+                type: 'scatter',
+                mode: 'lines',
+                line: { color: '#94a3b8', width: 1, dash: 'dot' }
+            };
+
+            const layout = {
+                title: { text: '', font: { color: '#e2e8f0' } },
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                font: { color: '#e2e8f0' },
+                xaxis: { title: 'Time', gridcolor: '#475569' },
+                yaxis: { 
+                    title: 'Ratio',
+                    gridcolor: '#475569',
+                    zeroline: false
+                },
+                legend: { bgcolor: 'rgba(30, 41, 59, 0.8)' },
+                hovermode: 'x unified'
+            };
+
+            Plotly.newPlot('pcRatioChart', [trace1, trace2, trace3], layout, {responsive: true});
+        }
+
+        function plotTrendAnalysis(data) {
+            const timestamps = data.map(d => d.timestamp);
+            const current = data.map(d => d.oi_change_diff_put_call || 0);
+            const ma5 = data.map(d => d.oi_change_diff_ma5 || null);
+            const ma15 = data.map(d => d.oi_change_diff_ma15 || null);
+            const ma30 = data.map(d => d.oi_change_diff_ma30 || null);
+
+            const traces = [
+                {
+                    x: timestamps,
+                    y: current,
+                    name: 'Current',
+                    type: 'scatter',
+                    mode: 'lines+markers',
+                    line: { color: '#60a5fa', width: 2 },
+                    marker: { size: 3 }
+                },
+                {
+                    x: timestamps,
+                    y: ma5,
+                    name: 'MA5',
+                    type: 'scatter',
+                    mode: 'lines',
+                    line: { color: '#4ade80', width: 1.5 }
+                },
+                {
+                    x: timestamps,
+                    y: ma15,
+                    name: 'MA15',
+                    type: 'scatter',
+                    mode: 'lines',
+                    line: { color: '#fbbf24', width: 1.5 }
+                },
+                {
+                    x: timestamps,
+                    y: ma30,
+                    name: 'MA30',
+                    type: 'scatter',
+                    mode: 'lines',
+                    line: { color: '#f87171', width: 1.5 }
+                }
+            ];
+
+            const layout = {
+                title: { text: '', font: { color: '#e2e8f0' } },
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                font: { color: '#e2e8f0' },
+                xaxis: { title: 'Time', gridcolor: '#475569' },
+                yaxis: { 
+                    title: 'OI Change Difference',
+                    gridcolor: '#475569',
+                    zeroline: true,
+                    zerolinecolor: '#94a3b8'
+                },
+                legend: { bgcolor: 'rgba(30, 41, 59, 0.8)' },
+                hovermode: 'x unified'
+            };
+
+            Plotly.newPlot('trendChart', traces, layout, {responsive: true});
+        }
+
+        function plotVolumeAnalysis(data) {
+            const timestamps = data.map(d => d.timestamp);
+            const volume = data.map(d => d.total_volume_all || 0);
+            const volumeMA5 = data.map(d => d.volume_ma5 || null);
+            const spikes = data.filter(d => d.is_volume_spike);
+
+            const trace1 = {
+                x: timestamps,
+                y: volume,
+                name: 'Total Volume',
+                type: 'bar',
+                marker: { color: '#60a5fa', opacity: 0.7 }
+            };
+
+            const trace2 = {
+                x: timestamps,
+                y: volumeMA5,
+                name: 'Volume MA5',
+                type: 'scatter',
+                mode: 'lines',
+                line: { color: '#4ade80', width: 2 }
+            };
+
+            const trace3 = {
+                x: spikes.map(d => d.timestamp),
+                y: spikes.map(d => d.total_volume_all),
+                name: 'Volume Spikes',
+                type: 'scatter',
+                mode: 'markers',
+                marker: { 
+                    color: '#f87171',
+                    size: 12,
+                    symbol: 'diamond'
+                }
+            };
+
+            const layout = {
+                title: { text: '', font: { color: '#e2e8f0' } },
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                font: { color: '#e2e8f0' },
+                xaxis: { title: 'Time', gridcolor: '#475569' },
+                yaxis: { title: 'Volume', gridcolor: '#475569' },
+                legend: { bgcolor: 'rgba(30, 41, 59, 0.8)' },
+                hovermode: 'x unified'
+            };
+
+            Plotly.newPlot('volumeChart', [trace1, trace2, trace3], layout, {responsive: true});
+        }
+
+        function plotIVAnalysis(data) {
+            const timestamps = data.map(d => d.timestamp);
+            const ivSkew = data.map(d => d.iv_skew || null);
+            const ivDiff = data.map(d => d.iv_diff_put_call || null);
+
+            const trace1 = {
+                x: timestamps,
+                y: ivSkew,
+                name: 'IV Skew (Put/Call)',
+                type: 'scatter',
+                mode: 'lines+markers',
+                line: { color: '#f87171', width: 2 },
+                marker: { size: 4 },
+                yaxis: 'y'
+            };
+
+            const trace2 = {
+                x: timestamps,
+                y: ivDiff,
+                name: 'IV Difference (Put - Call)',
+                type: 'scatter',
+                mode: 'lines',
+                line: { color: '#fb923c', width: 2, dash: 'dash' },
+                yaxis: 'y2'
+            };
+
+            const trace3 = {
+                x: timestamps,
+                y: Array(timestamps.length).fill(1),
+                name: 'Neutral Skew Line',
+                type: 'scatter',
+                mode: 'lines',
+                line: { color: '#94a3b8', width: 1, dash: 'dot' },
+                yaxis: 'y'
+            };
+
+            const layout = {
+                title: { text: '', font: { color: '#e2e8f0' } },
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                font: { color: '#e2e8f0' },
+                xaxis: { title: 'Time', gridcolor: '#475569' },
+                yaxis: {
+                    title: 'IV Skew',
+                    side: 'left',
+                    gridcolor: '#475569',
+                    zeroline: false
+                },
+                yaxis2: {
+                    title: 'IV Difference',
+                    side: 'right',
+                    overlaying: 'y',
+                    gridcolor: '#475569'
+                },
+                legend: { bgcolor: 'rgba(30, 41, 59, 0.8)' },
+                hovermode: 'x unified'
+            };
+
+            Plotly.newPlot('ivChart', [trace1, trace2, trace3], layout, {responsive: true});
+        }
+
+        function plotPredictionSignals(data) {
+            const timestamps = data.map(d => d.timestamp);
+            const predictions = data.map(d => {
+                const signal = d.prediction_signal || 'NEUTRAL_PREDICT';
+                if (signal.includes('BULLISH')) return 1;
+                if (signal.includes('BEARISH')) return -1;
+                return 0;
+            });
+
+            const trace = {
+                x: timestamps,
+                y: predictions,
+                name: 'Prediction Signal',
+                type: 'scatter',
+                mode: 'lines+markers',
+                line: { 
+                    color: '#60a5fa',
+                    width: 2,
+                    shape: 'hv'
+                },
+                marker: { 
+                    size: 6,
+                    color: predictions.map(p => p > 0 ? '#4ade80' : p < 0 ? '#f87171' : '#94a3b8')
+                },
+                text: data.map(d => d.prediction_signal || 'NEUTRAL'),
+                hovertemplate: '<b>%{text}</b><br>Time: %{x}<extra></extra>'
+            };
+
+            const layout = {
+                title: { text: '', font: { color: '#e2e8f0' } },
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                font: { color: '#e2e8f0' },
+                xaxis: { title: 'Time', gridcolor: '#475569' },
+                yaxis: { 
+                    title: 'Signal',
+                    tickvals: [-1, 0, 1],
+                    ticktext: ['BEARISH', 'NEUTRAL', 'BULLISH'],
+                    gridcolor: '#475569',
+                    zeroline: true,
+                    zerolinecolor: '#94a3b8'
+                },
+                legend: { bgcolor: 'rgba(30, 41, 59, 0.8)' },
+                hovermode: 'x unified'
+            };
+
+            Plotly.newPlot('predictionChart', [trace], layout, {responsive: true});
+        }
+
+        function updateTurningPoints(data) {
+            const turningPoints = data
+                .filter(d => d.is_turning_point)
+                .slice(0, 20)
+                .reverse();
+
+            if (turningPoints.length === 0) {
+                document.getElementById('turningPoints').innerHTML = '<p style="color: #94a3b8; text-align: center; padding: 20px;">No turning points found in the selected time range.</p>';
+                return;
+            }
+
+            const html = turningPoints.map(tp => {
+                const isBullish = tp.trend_direction?.includes('BULLISH');
+                const className = isBullish ? 'bullish' : 'bearish';
+                const time = new Date(tp.timestamp).toLocaleString();
+                
+                return `
+                    <div class="turning-point-item ${className}">
+                        <div class="time">${time}</div>
+                        <div class="signal">
+                            <strong>Trend:</strong> ${tp.trend_direction || 'N/A'} | 
+                            <strong>OI Change Diff:</strong> ${tp.oi_change_diff_put_call?.toLocaleString() || 'N/A'} | 
+                            <strong>Prediction:</strong> ${tp.prediction_signal || 'N/A'}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            document.getElementById('turningPoints').innerHTML = html;
+        }
+
+        // Auto-refresh every 60 seconds
+        function startAutoRefresh() {
+            if (autoRefreshInterval) {
+                clearInterval(autoRefreshInterval);
+            }
+            autoRefreshInterval = setInterval(loadData, 60000);
+        }
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            loadData();
+            startAutoRefresh();
+        });
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            if (autoRefreshInterval) {
+                clearInterval(autoRefreshInterval);
+            }
+        });
+    </script>
+</body>
+</html>

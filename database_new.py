@@ -20,7 +20,7 @@ warnings.filterwarnings('ignore', message='.*pandas only supports SQLAlchemy con
 
 from datetime import datetime, timedelta, date
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict
 
 from time_utils import now_ist, to_ist
 from threading import Lock
@@ -349,6 +349,29 @@ def initialize_database():
                     created_at TIMESTAMP DEFAULT NOW(),
                     UNIQUE(timestamp, exchange, resolution, token)
                 )
+                ''',
+                '''
+                CREATE TABLE IF NOT EXISTS nse_multi_expiry_minute_data (
+                    timestamp TIMESTAMP NOT NULL,
+                    exchange TEXT NOT NULL,
+                    open_price DOUBLE PRECISION NOT NULL,
+                    base_strike DOUBLE PRECISION NOT NULL,
+                    expiry_1_date DATE,
+                    expiry_2_date DATE,
+                    expiry_3_date DATE,
+                    expiry_4_date DATE,
+                    expiry_5_date DATE,
+                    total_oi_call_all_expiries DOUBLE PRECISION,
+                    total_oi_put_all_expiries DOUBLE PRECISION,
+                    total_oi_change_call_all_expiries DOUBLE PRECISION,
+                    total_oi_change_put_all_expiries DOUBLE PRECISION,
+                    total_volume_call_all_expiries DOUBLE PRECISION,
+                    total_volume_put_all_expiries DOUBLE PRECISION,
+                    avg_iv_call_all_expiries DOUBLE PRECISION,
+                    avg_iv_put_all_expiries DOUBLE PRECISION,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    PRIMARY KEY (timestamp, exchange, base_strike)
+                )
                 '''
             ]
 
@@ -368,7 +391,8 @@ def initialize_database():
             "SELECT create_hypertable('macro_signals', 'timestamp', if_not_exists => TRUE);",
             "SELECT create_hypertable('order_book_depth_snapshots', 'timestamp', if_not_exists => TRUE);",
             "SELECT create_hypertable('paper_trading_metrics', 'timestamp', if_not_exists => TRUE);",
-            "SELECT create_hypertable('multi_resolution_bars', 'timestamp', if_not_exists => TRUE);"
+            "SELECT create_hypertable('multi_resolution_bars', 'timestamp', if_not_exists => TRUE);",
+            "SELECT create_hypertable('nse_multi_expiry_minute_data', 'timestamp', if_not_exists => TRUE);"
         ]
         for ht in hypertables:
             try:
@@ -387,7 +411,9 @@ def initialize_database():
             'CREATE INDEX IF NOT EXISTS idx_depth_snapshots_exchange ON order_book_depth_snapshots(exchange, timestamp DESC)',
             'CREATE INDEX IF NOT EXISTS idx_paper_trading_metrics_exchange_ts ON paper_trading_metrics(exchange, timestamp DESC)',
             'CREATE INDEX IF NOT EXISTS idx_multi_res_bars_resolution_time ON multi_resolution_bars(exchange, resolution, timestamp DESC)',
-            'CREATE INDEX IF NOT EXISTS idx_multi_res_bars_token_time ON multi_resolution_bars(token, timestamp DESC)'
+            'CREATE INDEX IF NOT EXISTS idx_multi_res_bars_token_time ON multi_resolution_bars(token, timestamp DESC)',
+            'CREATE INDEX IF NOT EXISTS idx_multi_expiry_ts_exchange ON nse_multi_expiry_minute_data(timestamp, exchange)',
+            'CREATE INDEX IF NOT EXISTS idx_multi_expiry_exchange_strike ON nse_multi_expiry_minute_data(exchange, base_strike, timestamp DESC)'
         ]
         for idx in indexes:
             try:
@@ -396,6 +422,13 @@ def initialize_database():
             except Exception as e:
                 logging.warning(f"Index creation skipped/failed: {e}")
                 conn.rollback()
+
+        # 5. Create Analytics View
+        try:
+            create_multi_expiry_analytics_view()
+            logging.info("✓ Analytics view created successfully")
+        except Exception as e:
+            logging.warning(f"Analytics view creation skipped/failed: {e}")
 
         # PostgreSQL only - no SQLite support
 
@@ -1519,3 +1552,339 @@ def save_multi_resolution_bars(
             logging.error(f"Error saving multi-resolution bar: {e}", exc_info=True)
             if 'conn' in locals():
                 release_db_connection(conn)
+
+
+def save_multi_expiry_minute_data(
+    exchange: str,
+    timestamp: datetime,
+    open_price: float,
+    base_strike: float,
+    expiry_dates: List[date],
+    aggregated_metrics: Dict[str, float]
+) -> bool:
+    """
+    Save aggregated multi-expiry option chain data to database.
+    
+    Args:
+        exchange: Exchange name (e.g., "NSE")
+        timestamp: Minute-level timestamp
+        open_price: Market open price for the day
+        base_strike: Calculated strike price for the day
+        expiry_dates: List of 5 expiry dates
+        aggregated_metrics: Dictionary with aggregated metrics from aggregate_option_metrics()
+    
+    Returns:
+        True if saved successfully, False otherwise
+    """
+    timestamp_iso = _coerce_iso_timestamp(timestamp)
+    current_time_iso = _coerce_iso_timestamp(now_ist())
+    
+    with db_lock:
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            ph = _get_placeholder()
+            
+            # Check if record already exists (avoid duplicates)
+            check_query = f"""
+                SELECT COUNT(*) FROM nse_multi_expiry_minute_data
+                WHERE timestamp = {ph} AND exchange = {ph} AND base_strike = {ph}
+            """
+            cursor.execute(check_query, (timestamp_iso, exchange, base_strike))
+            exists = cursor.fetchone()[0] > 0
+            
+            if exists:
+                logging.debug(f"Record already exists for {exchange} at {timestamp_iso} with strike {base_strike}, skipping")
+                release_db_connection(conn)
+                return True  # Not an error, just already exists
+            
+            # Don't save if all metrics are zero (data might not be available yet)
+            total_oi_call = aggregated_metrics.get('total_oi_call_all_expiries', 0) or 0
+            total_oi_put = aggregated_metrics.get('total_oi_put_all_expiries', 0) or 0
+            total_volume_call = aggregated_metrics.get('total_volume_call_all_expiries', 0) or 0
+            total_volume_put = aggregated_metrics.get('total_volume_put_all_expiries', 0) or 0
+            
+            if (total_oi_call == 0 and total_oi_put == 0 and 
+                total_volume_call == 0 and total_volume_put == 0):
+                logging.debug(
+                    f"All metrics are zero for {exchange} at {timestamp_iso}. "
+                    f"Data might not be available yet. Skipping save."
+                )
+                release_db_connection(conn)
+                return False  # Indicate that save was skipped due to no data
+            
+            # Don't save if change in OI is zero for both calls and puts
+            oi_change_call = aggregated_metrics.get('total_oi_change_call_all_expiries', 0) or 0
+            oi_change_put = aggregated_metrics.get('total_oi_change_put_all_expiries', 0) or 0
+            
+            if oi_change_call == 0 and oi_change_put == 0:
+                logging.debug(
+                    f"Change in OI is zero for both calls and puts for {exchange} at {timestamp_iso}. "
+                    f"Skipping save (no meaningful change detected)."
+                )
+                release_db_connection(conn)
+                return False  # Indicate that save was skipped due to zero change in OI
+            
+            # Prepare expiry dates (pad with None if less than 5)
+            expiry_list = list(expiry_dates[:5]) + [None] * (5 - len(expiry_dates))
+            
+            # Insert new record
+            insert_query = f"""
+                INSERT INTO nse_multi_expiry_minute_data (
+                    timestamp, exchange, open_price, base_strike,
+                    expiry_1_date, expiry_2_date, expiry_3_date, expiry_4_date, expiry_5_date,
+                    total_oi_call_all_expiries, total_oi_put_all_expiries,
+                    total_oi_change_call_all_expiries, total_oi_change_put_all_expiries,
+                    total_volume_call_all_expiries, total_volume_put_all_expiries,
+                    avg_iv_call_all_expiries, avg_iv_put_all_expiries,
+                    created_at
+                ) VALUES (
+                    {ph}, {ph}, {ph}, {ph},
+                    {ph}, {ph}, {ph}, {ph}, {ph},
+                    {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}
+                )
+            """
+            
+            cursor.execute(insert_query, (
+                timestamp_iso, exchange, open_price, base_strike,
+                expiry_list[0], expiry_list[1], expiry_list[2], expiry_list[3], expiry_list[4],
+                aggregated_metrics.get('total_oi_call_all_expiries', 0.0),
+                aggregated_metrics.get('total_oi_put_all_expiries', 0.0),
+                aggregated_metrics.get('total_oi_change_call_all_expiries', 0.0),
+                aggregated_metrics.get('total_oi_change_put_all_expiries', 0.0),
+                aggregated_metrics.get('total_volume_call_all_expiries', 0.0),
+                aggregated_metrics.get('total_volume_put_all_expiries', 0.0),
+                aggregated_metrics.get('avg_iv_call_all_expiries', 0.0),
+                aggregated_metrics.get('avg_iv_put_all_expiries', 0.0),
+                current_time_iso
+            ))
+            
+            conn.commit()
+            release_db_connection(conn)
+            logging.debug(f"✓ Saved multi-expiry data for {exchange} at {timestamp_iso} (strike: {base_strike})")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Error saving multi-expiry minute data: {e}", exc_info=True)
+            if 'conn' in locals():
+                release_db_connection(conn)
+            return False
+
+
+def create_multi_expiry_analytics_view():
+    """
+    Create a comprehensive analytics view for multi-expiry data that includes:
+    - All original columns
+    - Sentiment indicators (Put/Call ratios, OI change differences)
+    - Trend indicators (rolling averages, change directions)
+    - Turning point signals (OI change flips, divergence indicators)
+    
+    This view is designed for easy visualization and market prediction.
+    """
+    view_ddl = """
+    CREATE OR REPLACE VIEW nse_multi_expiry_analytics AS
+    WITH base_data AS (
+        SELECT 
+            timestamp,
+            exchange,
+            open_price,
+            base_strike,
+            expiry_1_date,
+            expiry_2_date,
+            expiry_3_date,
+            expiry_4_date,
+            expiry_5_date,
+            total_oi_call_all_expiries,
+            total_oi_put_all_expiries,
+            total_oi_change_call_all_expiries,
+            total_oi_change_put_all_expiries,
+            total_volume_call_all_expiries,
+            total_volume_put_all_expiries,
+            avg_iv_call_all_expiries,
+            avg_iv_put_all_expiries,
+            created_at,
+            -- Calculate sentiment indicators
+            (total_oi_put_all_expiries / NULLIF(total_oi_call_all_expiries, 0)) AS pc_oi_ratio,
+            (total_volume_put_all_expiries / NULLIF(total_volume_call_all_expiries, 0)) AS pc_volume_ratio,
+            (total_oi_change_put_all_expiries - total_oi_change_call_all_expiries) AS oi_change_diff_put_call,
+            (total_oi_change_put_all_expiries / NULLIF(ABS(total_oi_change_call_all_expiries), 0)) AS pc_oi_change_ratio,
+            (total_oi_call_all_expiries + total_oi_put_all_expiries) AS total_oi_all,
+            (total_oi_change_call_all_expiries + total_oi_change_put_all_expiries) AS total_oi_change_all,
+            (total_volume_call_all_expiries + total_volume_put_all_expiries) AS total_volume_all,
+            -- IV Skew (Put IV / Call IV) - higher skew indicates bearish sentiment
+            (avg_iv_put_all_expiries / NULLIF(avg_iv_call_all_expiries, 0)) AS iv_skew,
+            (avg_iv_put_all_expiries - avg_iv_call_all_expiries) AS iv_diff_put_call,
+            -- Sentiment score based on OI change difference (0-100 scale)
+            CASE 
+                WHEN (total_oi_change_put_all_expiries - total_oi_change_call_all_expiries) > 0 THEN
+                    LEAST(100, 50 + (total_oi_change_put_all_expiries - total_oi_change_call_all_expiries) / 10000.0 * 50)
+                ELSE
+                    GREATEST(0, 50 + (total_oi_change_put_all_expiries - total_oi_change_call_all_expiries) / 10000.0 * 50)
+            END AS sentiment_score_oi_change
+        FROM nse_multi_expiry_minute_data
+    ),
+    with_trends AS (
+        SELECT 
+            *,
+            -- Rolling averages for trend identification (5, 15, 30 minutes)
+            AVG(oi_change_diff_put_call) OVER (
+                PARTITION BY exchange, base_strike, DATE(timestamp) 
+                ORDER BY timestamp 
+                ROWS BETWEEN 4 PRECEDING AND CURRENT ROW
+            ) AS oi_change_diff_ma5,
+            AVG(oi_change_diff_put_call) OVER (
+                PARTITION BY exchange, base_strike, DATE(timestamp) 
+                ORDER BY timestamp 
+                ROWS BETWEEN 14 PRECEDING AND CURRENT ROW
+            ) AS oi_change_diff_ma15,
+            AVG(oi_change_diff_put_call) OVER (
+                PARTITION BY exchange, base_strike, DATE(timestamp) 
+                ORDER BY timestamp 
+                ROWS BETWEEN 29 PRECEDING AND CURRENT ROW
+            ) AS oi_change_diff_ma30,
+            AVG(total_oi_change_all) OVER (
+                PARTITION BY exchange, base_strike, DATE(timestamp) 
+                ORDER BY timestamp 
+                ROWS BETWEEN 4 PRECEDING AND CURRENT ROW
+            ) AS total_oi_change_ma5,
+            AVG(total_volume_all) OVER (
+                PARTITION BY exchange, base_strike, DATE(timestamp) 
+                ORDER BY timestamp 
+                ROWS BETWEEN 4 PRECEDING AND CURRENT ROW
+            ) AS volume_ma5,
+            -- Previous values for change direction
+            LAG(oi_change_diff_put_call, 1) OVER (
+                PARTITION BY exchange, base_strike, DATE(timestamp) 
+                ORDER BY timestamp
+            ) AS prev_oi_change_diff,
+            LAG(total_oi_change_all, 1) OVER (
+                PARTITION BY exchange, base_strike, DATE(timestamp) 
+                ORDER BY timestamp
+            ) AS prev_total_oi_change,
+            LAG(total_volume_all, 1) OVER (
+                PARTITION BY exchange, base_strike, DATE(timestamp) 
+                ORDER BY timestamp
+            ) AS prev_volume,
+            -- Standard deviation for volatility
+            STDDEV(oi_change_diff_put_call) OVER (
+                PARTITION BY exchange, base_strike, DATE(timestamp) 
+                ORDER BY timestamp 
+                ROWS BETWEEN 29 PRECEDING AND CURRENT ROW
+            ) AS oi_change_diff_std30
+        FROM base_data
+    ),
+    with_indicators AS (
+        SELECT 
+            *,
+            -- Turning Point Indicators
+            CASE 
+                WHEN prev_oi_change_diff IS NOT NULL THEN
+                    CASE 
+                        WHEN prev_oi_change_diff < 0 AND oi_change_diff_put_call > 0 THEN 'BEARISH_TURN'
+                        WHEN prev_oi_change_diff > 0 AND oi_change_diff_put_call < 0 THEN 'BULLISH_TURN'
+                        WHEN prev_oi_change_diff > 0 AND oi_change_diff_put_call > 0 THEN 'BEARISH_CONTINUE'
+                        WHEN prev_oi_change_diff < 0 AND oi_change_diff_put_call < 0 THEN 'BULLISH_CONTINUE'
+                        ELSE 'NEUTRAL'
+                    END
+                ELSE NULL
+            END AS trend_direction,
+            CASE 
+                WHEN prev_total_oi_change IS NOT NULL AND prev_total_oi_change < 0 AND total_oi_change_all > 0 THEN TRUE
+                WHEN prev_total_oi_change IS NOT NULL AND prev_total_oi_change > 0 AND total_oi_change_all < 0 THEN TRUE
+                ELSE FALSE
+            END AS is_turning_point,
+            -- Volume spike indicator (current volume > 2x of previous)
+            CASE 
+                WHEN prev_volume IS NOT NULL AND prev_volume > 0 AND total_volume_all > prev_volume * 2 THEN TRUE
+                ELSE FALSE
+            END AS is_volume_spike,
+            -- Sentiment Label
+            CASE 
+                WHEN oi_change_diff_put_call > 50000 THEN 'STRONG_BEARISH'
+                WHEN oi_change_diff_put_call > 20000 THEN 'BEARISH'
+                WHEN oi_change_diff_put_call > -20000 THEN 'NEUTRAL'
+                WHEN oi_change_diff_put_call > -50000 THEN 'BULLISH'
+                ELSE 'STRONG_BULLISH'
+            END AS sentiment_label
+        FROM with_trends
+    ),
+    with_predictions AS (
+        SELECT 
+            *,
+            -- Prediction Signal (for next day) - now we can reference trend_direction
+            CASE 
+                WHEN oi_change_diff_put_call > 50000 AND pc_oi_ratio > 1.2 AND iv_skew > 1.1 THEN 'BEARISH_PREDICT'
+                WHEN oi_change_diff_put_call < -50000 AND pc_oi_ratio < 0.8 AND iv_skew < 0.9 THEN 'BULLISH_PREDICT'
+                WHEN trend_direction IN ('BEARISH_TURN', 'BEARISH_CONTINUE') AND is_volume_spike THEN 'BEARISH_PREDICT'
+                WHEN trend_direction IN ('BULLISH_TURN', 'BULLISH_CONTINUE') AND is_volume_spike THEN 'BULLISH_PREDICT'
+                ELSE 'NEUTRAL_PREDICT'
+            END AS prediction_signal
+        FROM with_indicators
+    )
+    SELECT 
+    -- Original columns
+    timestamp,
+    exchange,
+    open_price,
+    base_strike,
+    expiry_1_date,
+    expiry_2_date,
+    expiry_3_date,
+    expiry_4_date,
+    expiry_5_date,
+    total_oi_call_all_expiries,
+    total_oi_put_all_expiries,
+    total_oi_change_call_all_expiries,
+    total_oi_change_put_all_expiries,
+    total_volume_call_all_expiries,
+    total_volume_put_all_expiries,
+    avg_iv_call_all_expiries,
+    avg_iv_put_all_expiries,
+    created_at,
+    -- Sentiment Indicators
+    pc_oi_ratio,
+    pc_volume_ratio,
+    oi_change_diff_put_call,
+    pc_oi_change_ratio,
+    total_oi_all,
+    total_oi_change_all,
+    total_volume_all,
+    iv_skew,
+    iv_diff_put_call,
+    sentiment_score_oi_change,
+    -- Trend Indicators
+    oi_change_diff_ma5,
+    oi_change_diff_ma15,
+    oi_change_diff_ma30,
+    total_oi_change_ma5,
+    volume_ma5,
+    -- Turning Point Indicators
+    trend_direction,
+    is_turning_point,
+    is_volume_spike,
+    -- Sentiment Label
+    sentiment_label,
+    -- Prediction Signal
+    prediction_signal,
+        prev_oi_change_diff,
+        prev_total_oi_change,
+        prev_volume,
+        ROUND(COALESCE(oi_change_diff_std30::numeric, 0), 2) AS oi_change_diff_std30
+    FROM with_predictions
+    ORDER BY timestamp DESC, exchange, base_strike;
+    """
+    
+    with db_lock:
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute(view_ddl)
+            conn.commit()
+            release_db_connection(conn)
+            logging.info("Created/updated nse_multi_expiry_analytics view successfully")
+            return True
+        except Exception as e:
+            logging.error(f"Error creating analytics view: {e}", exc_info=True)
+            if 'conn' in locals():
+                release_db_connection(conn)
+            return False

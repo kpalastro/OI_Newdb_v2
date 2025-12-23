@@ -4158,6 +4158,99 @@ def get_exchange_positions(exchange):
         return jsonify({'error': 'Internal server error'}), 500
 
 
+@app.route('/multi-expiry-analytics')
+@login_required()
+def multi_expiry_analytics_page():
+    """Serve the multi-expiry analytics dashboard page."""
+    return render_template('multi_expiry_analytics.html')
+
+@app.route('/api/multi-expiry-analytics')
+@login_required(json_response=True)
+def api_multi_expiry_analytics():
+    """API endpoint to fetch multi-expiry analytics data."""
+    try:
+        exchange = request.args.get('exchange', 'NSE')
+        hours = int(request.args.get('hours', 8))
+        limit = int(request.args.get('limit', 200))
+        
+        from database_new import get_db_connection, release_db_connection
+        from datetime import datetime, timedelta
+        from time_utils import now_ist
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Calculate time filter
+        cutoff_time = now_ist() - timedelta(hours=hours)
+        
+        query = """
+            SELECT 
+                timestamp,
+                exchange,
+                base_strike,
+                oi_change_diff_put_call,
+                sentiment_score_oi_change,
+                sentiment_label,
+                trend_direction,
+                is_turning_point,
+                prediction_signal,
+                pc_oi_ratio,
+                pc_volume_ratio,
+                total_volume_all,
+                volume_ma5,
+                is_volume_spike,
+                iv_skew,
+                iv_diff_put_call,
+                oi_change_diff_ma5,
+                oi_change_diff_ma15,
+                oi_change_diff_ma30,
+                total_oi_change_all
+            FROM nse_multi_expiry_analytics
+            WHERE exchange = %s
+              AND timestamp >= %s
+            ORDER BY timestamp DESC
+            LIMIT %s
+        """
+        
+        cursor.execute(query, (exchange, cutoff_time, limit))
+        columns = [desc[0] for desc in cursor.description]
+        rows = cursor.fetchall()
+        
+        data = []
+        for row in rows:
+            record = dict(zip(columns, row))
+            # Convert datetime to ISO string for JSON serialization
+            if isinstance(record['timestamp'], datetime):
+                record['timestamp'] = record['timestamp'].isoformat()
+            # Handle Decimal types from PostgreSQL
+            for key, value in record.items():
+                if hasattr(value, '__float__') and not isinstance(value, (int, float, bool, type(None), str)):
+                    try:
+                        record[key] = float(value)
+                    except (ValueError, TypeError):
+                        pass
+            data.append(record)
+        
+        release_db_connection(conn)
+        
+        # Log for debugging
+        logging.debug(f"Multi-expiry analytics query: exchange={exchange}, hours={hours}, limit={limit}, returned {len(data)} records")
+        
+        return jsonify({
+            'success': True,
+            'data': data,
+            'count': len(data),
+            'exchange': exchange,
+            'time_range_hours': hours
+        })
+        
+    except Exception as e:
+        logging.error(f"Error fetching multi-expiry analytics: {e}", exc_info=True)
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
 @app.route('/api/feedback', methods=['POST'])
 @login_required(json_response=True)
 def submit_feedback():

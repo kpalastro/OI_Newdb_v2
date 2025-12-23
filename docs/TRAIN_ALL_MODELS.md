@@ -226,3 +226,5 @@ For issues or questions:
 - Verify database has sufficient data
 - Ensure all dependencies are installed
 
+allow_unsafe_werkzeug=True
+python train_orchestrator.py --exchange BSE  --window-days 3 --step-days 1 --families lightgbm xgboost catboost rl-dqn rl-ppo
