@@ -176,6 +176,32 @@ class MarketRegimeDetector:
                 # Prepare feature vector in correct order
                 features = [market_data.get(f, 0.0) for f in self.feature_order]
                 X = np.array(features).reshape(1, -1)
+                
+                # Check if feature count matches HMM model expectations
+                # HMM model's means_ attribute has shape (n_components, n_features)
+                if hasattr(self.hmm_model, 'means_') and self.hmm_model.means_ is not None:
+                    expected_n_features = self.hmm_model.means_.shape[1]
+                    actual_n_features = X.shape[1]
+                    
+                    if actual_n_features != expected_n_features:
+                        # Adjust input to match model's expected feature count
+                        if actual_n_features > expected_n_features:
+                            # Model was trained with fewer features (likely one was removed as constant)
+                            # Use only the first N features that match
+                            X = X[:, :expected_n_features]
+                            logging.debug(
+                                f"HMM feature mismatch: model expects {expected_n_features} features, "
+                                f"got {actual_n_features}. Using first {expected_n_features} features."
+                            )
+                        else:
+                            # Not enough features - pad with zeros
+                            padding = np.zeros((1, expected_n_features - actual_n_features))
+                            X = np.hstack([X, padding])
+                            logging.debug(
+                                f"HMM feature mismatch: model expects {expected_n_features} features, "
+                                f"got {actual_n_features}. Padding with zeros."
+                            )
+                
                 hmm_state = int(self.hmm_model.predict(X)[0])
                 
                 # Use persisted mapping
@@ -185,7 +211,8 @@ class MarketRegimeDetector:
                     logging.warning(f"HMM state {hmm_state} not in regime_map, using heuristic")
                     
             except Exception as e:
-                logging.warning(f"HMM prediction failed: {e}")
+                # Change from warning to debug to reduce log noise
+                logging.debug(f"HMM prediction failed: {e}. Using fallback heuristics.")
         
         # 3. Fallback Heuristics (when HMM not available or mapping failed)
         if roc > 0.5:
