@@ -871,6 +871,14 @@ def save_option_chain_snapshot(exchange, call_options, put_options, underlying_p
             logging.info(f"✓ Saved {len(records)} records + ML features for {exchange}")
             release_db_connection(conn)
             
+            # After saving main features, try to update nse_next_* columns from multi-expiry data
+            # This ensures real-time synchronization if multi-expiry data exists
+            try:
+                _update_ml_features_from_multi_expiry(exchange, timestamp_iso)
+            except Exception as update_err:
+                # Log but don't fail the main save operation
+                logging.debug(f"Could not update nse_next_* from multi-expiry data: {update_err}")
+            
         except Exception as e:
             logging.error(f"Error saving snapshot: {e}", exc_info=True)
             if 'conn' in locals():
@@ -1662,6 +1670,10 @@ def save_multi_expiry_minute_data(
             conn.commit()
             release_db_connection(conn)
             logging.debug(f"✓ Saved multi-expiry data for {exchange} at {timestamp_iso} (strike: {base_strike})")
+            
+            # After saving multi-expiry data, update ml_features table
+            _update_ml_features_from_multi_expiry(exchange, timestamp_iso)
+            
             return True
             
         except Exception as e:
@@ -1669,6 +1681,152 @@ def save_multi_expiry_minute_data(
             if 'conn' in locals():
                 release_db_connection(conn)
             return False
+
+
+def _update_ml_features_from_multi_expiry(exchange: str, timestamp: datetime):
+    """
+    Update ml_features table's nse_next_* columns and oi_next_sentiment 
+    from nse_multi_expiry_minute_data for the given timestamp and exchange.
+    
+    This function is called after saving multi-expiry data to keep ml_features
+    synchronized in real-time.
+    
+    Args:
+        exchange: Exchange name (e.g., 'NSE')
+        timestamp: Timestamp to match (will be rounded to minute)
+    """
+    try:
+        with db_lock:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            # Round timestamp to minute for matching
+            timestamp_iso = _coerce_iso_timestamp(timestamp)
+            ph = _get_placeholder()
+            
+            # Fetch the latest multi-expiry data for this timestamp (rounded to minute)
+            fetch_query = f"""
+                SELECT 
+                    total_oi_call_all_expiries,
+                    total_oi_put_all_expiries,
+                    total_oi_change_call_all_expiries,
+                    total_oi_change_put_all_expiries,
+                    total_volume_call_all_expiries,
+                    total_volume_put_all_expiries,
+                    avg_iv_call_all_expiries,
+                    avg_iv_put_all_expiries
+                FROM nse_multi_expiry_minute_data
+                WHERE exchange = {ph}
+                  AND DATE_TRUNC('minute', timestamp) = DATE_TRUNC('minute', {ph}::timestamp)
+                ORDER BY timestamp DESC
+                LIMIT 1
+            """
+            
+            cursor.execute(fetch_query, (exchange, timestamp_iso))
+            row = cursor.fetchone()
+            
+            if not row:
+                # No multi-expiry data found, skip update
+                release_db_connection(conn)
+                return
+            
+            # Extract values
+            (total_oi_call, total_oi_put, 
+             total_oi_change_call, total_oi_change_put,
+             total_volume_call, total_volume_put,
+             avg_iv_call, avg_iv_put) = row
+            
+            # Calculate derived values
+            oi_change_diff = (total_oi_change_put or 0.0) - (total_oi_change_call or 0.0)
+            oi_next_sentiment = oi_change_diff
+            
+            # Update ml_features table
+            # First, get existing feature_payload if it exists
+            get_payload_query = f"""
+                SELECT feature_payload
+                FROM ml_features
+                WHERE exchange = {ph}
+                  AND DATE_TRUNC('minute', timestamp) = DATE_TRUNC('minute', {ph}::timestamp)
+                LIMIT 1
+            """
+            
+            cursor.execute(get_payload_query, (exchange, timestamp_iso))
+            payload_row = cursor.fetchone()
+            existing_payload = payload_row[0] if payload_row and payload_row[0] else None
+            
+            # Build updated feature_payload JSON
+            if existing_payload:
+                try:
+                    payload_dict = json.loads(existing_payload) if isinstance(existing_payload, str) else existing_payload
+                except (json.JSONDecodeError, TypeError):
+                    payload_dict = {}
+            else:
+                payload_dict = {}
+            
+            # Update/merge nse_next_* keys in payload
+            payload_dict.update({
+                'nse_next_oi_call_total': total_oi_call or 0.0,
+                'nse_next_oi_put_total': total_oi_put or 0.0,
+                'nse_next_oi_change_call_total': total_oi_change_call or 0.0,
+                'nse_next_oi_change_put_total': total_oi_change_put or 0.0,
+                'nse_next_volume_call_total': total_volume_call or 0.0,
+                'nse_next_volume_put_total': total_volume_put or 0.0,
+                'nse_next_oi_change_diff_put_call': oi_change_diff,
+                'oi_next_sentiment': oi_next_sentiment
+            })
+            
+            updated_payload = json.dumps(payload_dict)
+            
+            # Update ml_features with nse_next_* columns and feature_payload
+            update_query = f"""
+                UPDATE ml_features
+                SET 
+                    nse_next_oi_call_total = {ph},
+                    nse_next_oi_put_total = {ph},
+                    nse_next_oi_change_call_total = {ph},
+                    nse_next_oi_change_put_total = {ph},
+                    nse_next_volume_call_total = {ph},
+                    nse_next_volume_put_total = {ph},
+                    nse_next_oi_change_diff_put_call = {ph},
+                    oi_next_sentiment = {ph},
+                    feature_payload = {ph}
+                WHERE exchange = {ph}
+                  AND DATE_TRUNC('minute', timestamp) = DATE_TRUNC('minute', {ph}::timestamp)
+            """
+            
+            cursor.execute(update_query, (
+                total_oi_call or 0.0,
+                total_oi_put or 0.0,
+                total_oi_change_call or 0.0,
+                total_oi_change_put or 0.0,
+                total_volume_call or 0.0,
+                total_volume_put or 0.0,
+                oi_change_diff,
+                oi_next_sentiment,
+                updated_payload,
+                exchange,
+                timestamp_iso
+            ))
+            
+            rows_updated = cursor.rowcount
+            conn.commit()
+            release_db_connection(conn)
+            
+            if rows_updated > 0:
+                logging.debug(
+                    f"✓ Updated ml_features with nse_next_* data for {exchange} at {timestamp_iso} "
+                    f"({rows_updated} row(s) updated)"
+                )
+            else:
+                logging.debug(
+                    f"No ml_features record found to update for {exchange} at {timestamp_iso} "
+                    f"(record may not exist yet)"
+                )
+                
+    except Exception as e:
+        logging.error(f"Error updating ml_features from multi-expiry data: {e}", exc_info=True)
+        if 'conn' in locals():
+            release_db_connection(conn)
 
 
 def create_multi_expiry_analytics_view():

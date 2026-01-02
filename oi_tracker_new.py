@@ -74,6 +74,7 @@ from recommendation_logging import log_recommendation
 from utils.rate_limiter import get_rate_limiter
 from utils.performance import timing_decorator, PerformanceTimer, log_slow_operation
 from websocket_manager import get_websocket_manager
+from nse_multi_expiry_collector import MultiExpiryCollectorService
 
 
 # Helpers to resolve macro exchange mapping
@@ -347,6 +348,8 @@ header_update_thread = None
 macro_save_thread = None
 system_health_thread = None
 exchange_update_threads: Dict[str, Thread] = {}
+# Multi-expiry collector services (one per exchange)
+multi_expiry_collectors: Dict[str, MultiExpiryCollectorService] = {}
 
 
 def _auth_guard(json_response: bool = False):
@@ -421,6 +424,7 @@ def start_background_threads():
     """Start supporting background workers after system initialization."""
     global background_threads_started, io_thread, feature_worker
     global feature_result_thread, header_update_thread, macro_save_thread, system_health_thread
+    global multi_expiry_collectors
 
     with background_threads_lock:
         if background_threads_started:
@@ -495,6 +499,33 @@ def start_background_threads():
             thread.start()
             exchange_update_threads[ex] = thread
             logging.info(f"✓ {ex} update thread started")
+
+        # Start multi-expiry collector services for supported exchanges
+        # Currently only NSE is supported for multi-expiry collection
+        if app_manager.kite:
+            supported_exchanges = ['NSE']  # Add more exchanges here as support is added
+            for ex in supported_exchanges:
+                if ex in exchange_handlers:
+                    try:
+                        # Check if collector already exists and is running
+                        if ex in multi_expiry_collectors:
+                            collector = multi_expiry_collectors[ex]
+                            if collector.running:
+                                logging.debug(f"Multi-expiry collector for {ex} already running")
+                                continue
+                        
+                        # Initialize and start collector service
+                        collector = MultiExpiryCollectorService(
+                            kite_obj=app_manager.kite,
+                            exchange=ex
+                        )
+                        collector.start()
+                        multi_expiry_collectors[ex] = collector
+                        logging.info(f"✓ Multi-expiry collector service started for {ex}")
+                    except Exception as e:
+                        logging.error(f"Failed to start multi-expiry collector for {ex}: {e}", exc_info=True)
+                else:
+                    logging.debug(f"Skipping multi-expiry collector for {ex} (exchange handler not available)")
 
         background_threads_started = True
 
@@ -5524,7 +5555,7 @@ def soft_shutdown():
     """
     global background_threads_started, io_thread, feature_worker
     global feature_result_thread, header_update_thread, macro_save_thread
-    global exchange_update_threads
+    global exchange_update_threads, multi_expiry_collectors
 
     logging.info("=" * 70)
     logging.info("Performing soft shutdown (preparing for re-login)")
@@ -5535,6 +5566,16 @@ def soft_shutdown():
         ws_manager = get_websocket_manager()
         ws_manager.soft_reset()
         logging.info("WebSocket soft reset complete")
+
+        # Stop multi-expiry collector services
+        for ex, collector in list(multi_expiry_collectors.items()):
+            try:
+                if collector and collector.running:
+                    collector.stop()
+                    logging.info(f"Multi-expiry collector for {ex} stopped")
+            except Exception as e:
+                logging.error(f"Error stopping multi-expiry collector for {ex}: {e}")
+        multi_expiry_collectors.clear()
 
         # Stop feature worker process (non-blocking - don't wait)
         if feature_worker and feature_worker.is_alive():
@@ -5654,7 +5695,7 @@ def request_shutdown(reason: str = "User requested shutdown"):
 
 def cleanup_connections():
     """Cleanup on exit."""
-    global feature_worker, feature_result_thread
+    global feature_worker, feature_result_thread, multi_expiry_collectors
     
     # Suppress kiteconnect noise during cleanup
     logging.getLogger("kiteconnect.ticker").setLevel(logging.CRITICAL)
@@ -5666,6 +5707,16 @@ def cleanup_connections():
     logging.info("🧹 Running cleanup...")
     
     try:
+        # Stop multi-expiry collector services
+        for ex, collector in list(multi_expiry_collectors.items()):
+            try:
+                if collector and collector.running:
+                    collector.stop()
+                    logging.info(f"Multi-expiry collector for {ex} stopped")
+            except Exception as e:
+                logging.error(f"Error stopping multi-expiry collector for {ex}: {e}")
+        multi_expiry_collectors.clear()
+        
         reel_persistence.save(exchange_handlers)
 
         if feature_worker:

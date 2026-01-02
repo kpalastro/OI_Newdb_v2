@@ -55,3 +55,16 @@ FROM nse_multi_expiry_analytics
 WHERE exchange = 'NSE'
 ORDER BY timestamp DESC
 LIMIT 50;
+
+-- Step 6: Group by date to see record counts per day
+SELECT 
+    DATE(timestamp) AS trade_date,
+    exchange,
+    COUNT(*) AS record_count,
+    MIN(timestamp) AS first_record,
+    MAX(timestamp) AS last_record
+FROM nse_multi_expiry_minute_data
+WHERE exchange = 'NSE'
+GROUP BY DATE(timestamp), exchange
+ORDER BY trade_date DESC
+LIMIT 100;
