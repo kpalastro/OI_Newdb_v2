@@ -2803,11 +2803,12 @@ def calculate_oi_differences_from_reels(handler: ExchangeDataHandler, option_det
                 report[key] = {}
                 reel = handler.data_reels.get(token)
                 if not reel or len(reel) == 0:
-                    # Log warning if reel is empty (only once per token to avoid spam)
+                    # Log debug if reel is empty (only once per token to avoid spam)
+                    # Empty reels are expected during startup, so use DEBUG level
                     if not hasattr(handler, '_empty_reel_warned'):
                         handler._empty_reel_warned = set()
                     if token not in handler._empty_reel_warned:
-                        logging.warning(f"[{handler.exchange}] Empty reel for token {token} ({key}) - OI changes will be N/A")
+                        logging.debug(f"[{handler.exchange}] Empty reel for token {token} ({key}) - OI changes will be N/A (expected during startup)")
                         handler._empty_reel_warned.add(token)
                     continue
                 
@@ -2818,15 +2819,16 @@ def calculate_oi_differences_from_reels(handler: ExchangeDataHandler, option_det
                 report[key]['last_release_ts'] = release_ts
                 
                 # Log if reel doesn't have enough data for the longest interval
+                # Use DEBUG level as this is expected during startup
                 max_interval = max(OI_CHANGE_INTERVALS_MIN)
                 if len(reel) <= max_interval:
                     if not hasattr(handler, '_insufficient_data_warned'):
                         handler._insufficient_data_warned = set()
                     if token not in handler._insufficient_data_warned:
-                        logging.warning(
+                        logging.debug(
                             f"[{handler.exchange}] Insufficient reel data for token {token} ({key}): "
                             f"have {len(reel)} entries, need >{max_interval} for {max_interval}M changes. "
-                            f"OI changes may show N/A until enough historical data is collected."
+                            f"OI changes may show N/A until enough historical data is collected (expected during startup)."
                         )
                         handler._insufficient_data_warned.add(token)
                 
