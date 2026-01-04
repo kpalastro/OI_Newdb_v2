@@ -290,7 +290,7 @@ def import_ml_features_with_payload(csv_path: str):
 
 def main():
     """Main import function."""
-    tmp_dir = '/Users/kpal/projects/dilip/OI_Newdb_v2/tmp'
+    tmp_dir = './tmp'
     
     # Import order: start with simpler tables first
     imports = [

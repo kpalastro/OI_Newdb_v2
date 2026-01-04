@@ -304,7 +304,7 @@ def import_ml_features(csv_path: str):
 
 def main():
     """Import all CSV files."""
-    tmp_dir = '/Users/kpal/projects/dilip/OI_Newdb_v2/tmp'
+    tmp_dir = './tmp'
     
     # 1. option_chain_snapshots
     print("\n" + "="*60)
