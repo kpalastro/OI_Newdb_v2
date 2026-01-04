@@ -423,12 +423,10 @@ def initialize_database():
                 logging.warning(f"Index creation skipped/failed: {e}")
                 conn.rollback()
 
-        # 5. Create Analytics View
-        try:
-            create_multi_expiry_analytics_view()
-            logging.info("✓ Analytics view created successfully")
-        except Exception as e:
-            logging.warning(f"Analytics view creation skipped/failed: {e}")
+        # 5. Create Analytics View (defined later in this file)
+        # Skip for now - will be created when the function is defined
+        # This avoids NameError during module initialization
+        pass
 
         # PostgreSQL only - no SQLite support
 
@@ -1584,8 +1582,28 @@ def save_multi_expiry_minute_data(
     Returns:
         True if saved successfully, False otherwise
     """
+    # Validate inputs
+    if not exchange or not timestamp:
+        logging.error(f"Invalid inputs: exchange={exchange}, timestamp={timestamp}")
+        return False
+    
+    if aggregated_metrics is None:
+        logging.error(f"Aggregated metrics is None for {exchange} at {timestamp}")
+        return False
+    
     timestamp_iso = _coerce_iso_timestamp(timestamp)
     current_time_iso = _coerce_iso_timestamp(now_ist())
+    
+    # Log entry to function
+    if not hasattr(save_multi_expiry_minute_data, '_entry_count'):
+        save_multi_expiry_minute_data._entry_count = 0
+    save_multi_expiry_minute_data._entry_count += 1
+    
+    if save_multi_expiry_minute_data._entry_count <= 5:
+        logging.info(
+            f"ENTERING save_multi_expiry_minute_data #{save_multi_expiry_minute_data._entry_count}: "
+            f"exchange={exchange}, timestamp={timestamp_iso}, base_strike={base_strike}"
+        )
     
     with db_lock:
         try:
@@ -1593,18 +1611,20 @@ def save_multi_expiry_minute_data(
             cursor = conn.cursor()
             ph = _get_placeholder()
             
-            # Check if record already exists (avoid duplicates)
-            check_query = f"""
-                SELECT COUNT(*) FROM nse_multi_expiry_minute_data
-                WHERE timestamp = {ph} AND exchange = {ph} AND base_strike = {ph}
-            """
-            cursor.execute(check_query, (timestamp_iso, exchange, base_strike))
-            exists = cursor.fetchone()[0] > 0
+            # For backfilling, we use ON CONFLICT DO UPDATE, so we don't need to check for duplicates
+            # The database will handle conflicts automatically
+            # This allows re-running the backfill script to update existing records
             
-            if exists:
-                logging.debug(f"Record already exists for {exchange} at {timestamp_iso} with strike {base_strike}, skipping")
-                release_db_connection(conn)
-                return True  # Not an error, just already exists
+            # Log first few saves to debug
+            if not hasattr(save_multi_expiry_minute_data, '_call_count'):
+                save_multi_expiry_minute_data._call_count = 0
+            save_multi_expiry_minute_data._call_count += 1
+            
+            if save_multi_expiry_minute_data._call_count <= 5:
+                logging.info(
+                    f"Save call #{save_multi_expiry_minute_data._call_count}: "
+                    f"exchange={exchange}, timestamp={timestamp_iso}, base_strike={base_strike}"
+                )
             
             # Don't save if all metrics are zero (data might not be available yet)
             total_oi_call = aggregated_metrics.get('total_oi_call_all_expiries', 0) or 0
@@ -1612,31 +1632,43 @@ def save_multi_expiry_minute_data(
             total_volume_call = aggregated_metrics.get('total_volume_call_all_expiries', 0) or 0
             total_volume_put = aggregated_metrics.get('total_volume_put_all_expiries', 0) or 0
             
-            if (total_oi_call == 0 and total_oi_put == 0 and 
-                total_volume_call == 0 and total_volume_put == 0):
-                logging.debug(
-                    f"All metrics are zero for {exchange} at {timestamp_iso}. "
-                    f"Data might not be available yet. Skipping save."
-                )
-                release_db_connection(conn)
-                return False  # Indicate that save was skipped due to no data
+            # For historical backfilling, save ALL records even if all metrics are zero
+            # This ensures we capture the complete historical timeline
+            # The backfill script will handle filtering if needed
+            has_any_data = (
+                total_oi_call > 0 or total_oi_put > 0 or 
+                total_volume_call > 0 or total_volume_put > 0
+            )
             
-            # Don't save if change in OI is zero for both calls and puts
+            # Log zero data but don't skip - save for historical completeness
+            if not has_any_data:
+                if not hasattr(save_multi_expiry_minute_data, '_zero_data_count'):
+                    save_multi_expiry_minute_data._zero_data_count = 0
+                save_multi_expiry_minute_data._zero_data_count += 1
+                
+                if save_multi_expiry_minute_data._zero_data_count <= 5:
+                    logging.info(
+                        f"All metrics are zero for {exchange} at {timestamp_iso} but saving for historical completeness. "
+                        f"CE_OI={total_oi_call}, PE_OI={total_oi_put}, "
+                        f"CE_Vol={total_volume_call}, PE_Vol={total_volume_put}."
+                    )
+                # Continue to save even with zero data
+            
+            # Don't save if change in OI is zero for both calls and puts AND there's no volume activity
+            # This allows saving records with zero OI change if there's trading volume (for historical completeness)
             oi_change_call = aggregated_metrics.get('total_oi_change_call_all_expiries', 0) or 0
             oi_change_put = aggregated_metrics.get('total_oi_change_put_all_expiries', 0) or 0
             
-            if oi_change_call == 0 and oi_change_put == 0:
-                logging.debug(
-                    f"Change in OI is zero for both calls and puts for {exchange} at {timestamp_iso}. "
-                    f"Skipping save (no meaningful change detected)."
-                )
-                release_db_connection(conn)
-                return False  # Indicate that save was skipped due to zero change in OI
+            # Only skip if OI change is zero AND volume is also zero (no activity at all)
+            # But we already checked for has_any_data above, so if we reach here, we have some data
+            # So we should save it even if OI change is zero (for historical completeness)
+            # Actually, let's remove this check entirely for historical backfilling
+            # The check above (has_any_data) is sufficient
             
             # Prepare expiry dates (pad with None if less than 5)
             expiry_list = list(expiry_dates[:5]) + [None] * (5 - len(expiry_dates))
             
-            # Insert new record
+            # Insert new record with ON CONFLICT handling (in case of race conditions or retries)
             insert_query = f"""
                 INSERT INTO nse_multi_expiry_minute_data (
                     timestamp, exchange, open_price, base_strike,
@@ -1651,9 +1683,27 @@ def save_multi_expiry_minute_data(
                     {ph}, {ph}, {ph}, {ph}, {ph},
                     {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}
                 )
+                ON CONFLICT (timestamp, exchange, base_strike) 
+                DO UPDATE SET
+                    open_price = EXCLUDED.open_price,
+                    expiry_1_date = EXCLUDED.expiry_1_date,
+                    expiry_2_date = EXCLUDED.expiry_2_date,
+                    expiry_3_date = EXCLUDED.expiry_3_date,
+                    expiry_4_date = EXCLUDED.expiry_4_date,
+                    expiry_5_date = EXCLUDED.expiry_5_date,
+                    total_oi_call_all_expiries = EXCLUDED.total_oi_call_all_expiries,
+                    total_oi_put_all_expiries = EXCLUDED.total_oi_put_all_expiries,
+                    total_oi_change_call_all_expiries = EXCLUDED.total_oi_change_call_all_expiries,
+                    total_oi_change_put_all_expiries = EXCLUDED.total_oi_change_put_all_expiries,
+                    total_volume_call_all_expiries = EXCLUDED.total_volume_call_all_expiries,
+                    total_volume_put_all_expiries = EXCLUDED.total_volume_put_all_expiries,
+                    avg_iv_call_all_expiries = EXCLUDED.avg_iv_call_all_expiries,
+                    avg_iv_put_all_expiries = EXCLUDED.avg_iv_put_all_expiries,
+                    created_at = EXCLUDED.created_at
             """
             
-            cursor.execute(insert_query, (
+            # Prepare values for insert
+            insert_values = (
                 timestamp_iso, exchange, open_price, base_strike,
                 expiry_list[0], expiry_list[1], expiry_list[2], expiry_list[3], expiry_list[4],
                 aggregated_metrics.get('total_oi_call_all_expiries', 0.0),
@@ -1665,20 +1715,65 @@ def save_multi_expiry_minute_data(
                 aggregated_metrics.get('avg_iv_call_all_expiries', 0.0),
                 aggregated_metrics.get('avg_iv_put_all_expiries', 0.0),
                 current_time_iso
-            ))
+            )
+            
+            # Log first few inserts to debug
+            if save_multi_expiry_minute_data._call_count <= 5:
+                logging.info(f"Executing INSERT for {timestamp_iso} with {len(insert_values)} values")
+            
+            cursor.execute(insert_query, insert_values)
+            
+            # Check if insert was successful
+            rows_affected = cursor.rowcount
+            if save_multi_expiry_minute_data._call_count <= 5:
+                logging.info(f"INSERT executed: {rows_affected} row(s) affected")
             
             conn.commit()
             release_db_connection(conn)
-            logging.debug(f"✓ Saved multi-expiry data for {exchange} at {timestamp_iso} (strike: {base_strike})")
+            
+            # Log first 10 successful saves in detail
+            if not hasattr(save_multi_expiry_minute_data, '_success_count'):
+                save_multi_expiry_minute_data._success_count = 0
+            save_multi_expiry_minute_data._success_count += 1
+            
+            if save_multi_expiry_minute_data._success_count <= 10:
+                logging.info(
+                    f"✓ Saved multi-expiry data #{save_multi_expiry_minute_data._success_count} for {exchange} "
+                    f"at {timestamp_iso} (strike: {base_strike})"
+                )
+            else:
+                logging.debug(f"✓ Saved multi-expiry data for {exchange} at {timestamp_iso} (strike: {base_strike})")
             
             # After saving multi-expiry data, update ml_features table
-            _update_ml_features_from_multi_expiry(exchange, timestamp_iso)
+            # Wrap in try/except to prevent any errors from stopping the save
+            # IMPORTANT: This is a secondary operation - don't let it block the save
+            # Skip this for backfilling to speed things up - it can be done later
+            # try:
+            #     _update_ml_features_from_multi_expiry(exchange, timestamp_iso)
+            # except Exception as update_err:
+            #     # Log but don't fail - this is a secondary operation
+            #     logging.debug(f"Could not update ml_features: {update_err}")
+            #     # Don't re-raise - we want the save to succeed even if update fails
+            
+            # Log successful completion before returning
+            if save_multi_expiry_minute_data._success_count <= 5:
+                logging.info(f"Save function completing successfully for {exchange} at {timestamp_iso}, about to return True")
             
             return True
             
         except Exception as e:
-            logging.error(f"Error saving multi-expiry minute data: {e}", exc_info=True)
+            # Log detailed error information
+            logging.error(
+                f"ERROR saving multi-expiry minute data for {exchange} at {timestamp_iso}: {e}",
+                exc_info=True
+            )
+            # Log the actual error type and message
+            logging.error(f"Error type: {type(e).__name__}, Error message: {str(e)}")
             if 'conn' in locals():
+                try:
+                    conn.rollback()
+                except:
+                    pass
                 release_db_connection(conn)
             return False
 

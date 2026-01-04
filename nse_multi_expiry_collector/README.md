@@ -51,7 +51,7 @@ python nse_multi_expiry_collector/run_collector.py --exchange NSE
 ```
 
 **Options:**
-- `--exchange`: Exchange name (default: NSE)
+- ``: Exchange name (default: NSE)
 - `--user-id`: Zerodha user ID (optional, uses config/env if not provided)
 - `--password`: Zerodha password (optional, uses config/env if not provided)
 
@@ -67,8 +67,8 @@ Backfill data for past dates:
 ```bash
 python nse_multi_expiry_collector/backfill_multi_expiry.py \
     --exchange NSE \
-    --start-date 2025-12-10 \
-    --end-date 2025-12-15
+    --start-date 2026-01-02 \
+    --end-date 2026-01-02
 ```
 
 **Options:**

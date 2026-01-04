@@ -8,6 +8,7 @@ Provides functions to:
 """
 import logging
 import sys
+import time
 from pathlib import Path
 from datetime import date, datetime, timedelta, time as dt_time
 from typing import Dict, List, Optional, Tuple
@@ -28,6 +29,60 @@ logger = logging.getLogger(__name__)
 _instruments_cache: Dict[str, Tuple[List[Dict], datetime]] = {}
 _cache_lock = Lock()
 _cache_ttl = timedelta(minutes=5)  # Refresh cache every 5 minutes
+
+
+def _retry_api_call(func, max_retries=3, base_delay=1.0, max_delay=10.0, *args, **kwargs):
+    """
+    Retry an API call with exponential backoff.
+    
+    Args:
+        func: Function to call
+        max_retries: Maximum number of retry attempts
+        base_delay: Base delay in seconds for exponential backoff
+        max_delay: Maximum delay in seconds
+        *args, **kwargs: Arguments to pass to func
+    
+    Returns:
+        Result of func call, or None if all retries fail
+    """
+    last_exception = None
+    
+    for attempt in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except (ConnectionError, OSError, Exception) as e:
+            last_exception = e
+            error_msg = str(e).lower()
+            
+            # Check if it's a connection error
+            is_connection_error = (
+                'connection' in error_msg or
+                'remote' in error_msg or
+                'disconnected' in error_msg or
+                'aborted' in error_msg
+            )
+            
+            if attempt < max_retries - 1 and is_connection_error:
+                # Exponential backoff with jitter
+                delay = min(base_delay * (2 ** attempt), max_delay)
+                logger.warning(
+                    f"API call failed (attempt {attempt + 1}/{max_retries}): {e}. "
+                    f"Retrying in {delay:.1f} seconds..."
+                )
+                time.sleep(delay)
+            else:
+                # Not a connection error or last attempt
+                if attempt < max_retries - 1:
+                    # Short delay for other errors
+                    time.sleep(0.5)
+                else:
+                    logger.error(f"API call failed after {max_retries} attempts: {e}")
+                    raise
+    
+    if last_exception:
+        raise last_exception
+    
+    return None
 
 
 def get_next_5_expiries(
@@ -56,8 +111,11 @@ def get_next_5_expiries(
     try:
         # Fetch all instruments for the options exchange
         # Wrap in try-except to handle malformed CSV rows from Kite API
+        # Use retry logic for connection errors
         try:
-            instruments = kite_obj.instruments(options_exchange)
+            def _fetch_instruments():
+                return kite_obj.instruments(options_exchange)
+            instruments = _retry_api_call(_fetch_instruments, max_retries=3, base_delay=1.0)
         except (IndexError, ValueError) as e:
             logger.error(f"Error fetching instruments from Kite API (malformed CSV row): {e}")
             # Try fetching all instruments without exchange filter as fallback
@@ -133,15 +191,19 @@ def _get_cached_instruments(
             else:
                 logger.debug(f"Cache expired for {options_exchange}, refreshing...")
         
-        # Fetch fresh instruments
+        # Fetch fresh instruments with retry logic
         try:
             try:
-                instruments = kite_obj.instruments(options_exchange)
+                def _fetch_instruments_with_exchange():
+                    return kite_obj.instruments(options_exchange)
+                instruments = _retry_api_call(_fetch_instruments_with_exchange, max_retries=3, base_delay=1.0)
             except (IndexError, ValueError) as e:
                 logger.debug(f"Error fetching instruments with exchange filter (malformed CSV row): {e}")
                 # Try fetching all instruments without exchange filter as fallback
                 try:
-                    all_instruments = kite_obj.instruments(None)
+                    def _fetch_all_instruments():
+                        return kite_obj.instruments(None)
+                    all_instruments = _retry_api_call(_fetch_all_instruments, max_retries=3, base_delay=1.0)
                     instruments = [inst for inst in all_instruments if inst.get('exchange') == options_exchange]
                     logger.info(f"Fetched {len(instruments)} instruments using fallback method")
                 except Exception as e2:
@@ -487,16 +549,18 @@ def fetch_kite_option_chain_for_expiry(
         current_minute = current_time.replace(second=0, microsecond=0)
         
         try:
-            # Fetch CE data - get data from the target date
+            # Fetch CE data - get data from the target date with retry logic
             date_str = current_time.strftime('%Y-%m-%d')
-            ce_candles = kite_obj.historical_data(
-                ce_token,
-                date_str,
-                date_str,
-                'minute',
-                continuous=False,
-                oi=True
-            )
+            def _fetch_ce_candles():
+                return kite_obj.historical_data(
+                    ce_token,
+                    date_str,
+                    date_str,
+                    'minute',
+                    continuous=False,
+                    oi=True
+                )
+            ce_candles = _retry_api_call(_fetch_ce_candles, max_retries=3, base_delay=1.0)
             
             if ce_candles and len(ce_candles) > 0:
                 # Filter candles to current minute or most recent
@@ -543,16 +607,18 @@ def fetch_kite_option_chain_for_expiry(
             logger.warning(f"Error fetching CE data for token {ce_token}: {e}")
         
         try:
-            # Fetch PE data - same logic as CE
+            # Fetch PE data - same logic as CE with retry
             date_str = current_time.strftime('%Y-%m-%d')
-            pe_candles = kite_obj.historical_data(
-                pe_token,
-                date_str,
-                date_str,
-                'minute',
-                continuous=False,
-                oi=True
-            )
+            def _fetch_pe_candles():
+                return kite_obj.historical_data(
+                    pe_token,
+                    date_str,
+                    date_str,
+                    'minute',
+                    continuous=False,
+                    oi=True
+                )
+            pe_candles = _retry_api_call(_fetch_pe_candles, max_retries=3, base_delay=1.0)
             
             if pe_candles and len(pe_candles) > 0:
                 # Filter candles to current minute or most recent
