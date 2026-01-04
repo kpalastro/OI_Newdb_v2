@@ -1572,7 +1572,9 @@ def feature_result_consumer():
                             except Exception as vix_exc:
                                 logging.debug(f"[{result.exchange}] VIX snapshot skipped: {vix_exc}")
 
-                        # Only schedule save for options that actually changed
+                        # CRITICAL FIX: Always save ml_features even if no options changed
+                        # ML features need minute-by-minute snapshots for training
+                        # Only skip option snapshots if nothing changed, but always save ml_features
                         if changed_calls or changed_puts:
                             schedule_db_save(
                                 result.exchange,
@@ -1587,6 +1589,26 @@ def feature_result_consumer():
                                 underlying_future_oi=result.fut_oi,
                                 ml_features_dict=result.ml_features
                             )
+                            # Log how many rows we are saving
+                            logging.debug(f"[{result.exchange}] Saving {len(changed_calls)} calls and {len(changed_puts)} puts with changed OI")
+                        elif result.ml_features:
+                            # No options changed, but save ML features anyway
+                            # Pass empty lists for calls/puts - save_option_chain_snapshot will skip option snapshots
+                            # but still save ml_features
+                            schedule_db_save(
+                                result.exchange,
+                                [],  # Empty - will skip option snapshots
+                                [],  # Empty - will skip option snapshots
+                                underlying_price=result.spot_ltp,
+                                atm_strike=result.atm,
+                                expiry_date=handler.expiry_date,
+                                timestamp=result.timestamp,
+                                vix_value=latest_vix_data.get('value'),
+                                underlying_future_price=result.futures_price,
+                                underlying_future_oi=result.fut_oi,
+                                ml_features_dict=result.ml_features
+                            )
+                            logging.debug(f"[{result.exchange}] No OI changes, but saving ML features for training")
                             # Log how many rows we are saving
                             logging.debug(f"[{result.exchange}] Saving {len(changed_calls)} calls and {len(changed_puts)} puts with changed OI")
                         else:
@@ -2447,6 +2469,13 @@ def schedule_db_save(exchange: str, calls: list, puts: list, **kwargs):
             ts,
         )
         return
+
+    # #region agent log
+    import json
+    from datetime import datetime
+    with open('/Users/kpal/projects/dilip/OI_Newdb_v2/.cursor/debug.log', 'a') as f:
+        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"F","location":"oi_tracker_new.py:2426","message":"schedule_db_save called","data":{"exchange":exchange,"calls_count":len(calls),"puts_count":len(puts),"has_ml_features":kwargs.get('ml_features_dict') is not None,"timestamp":str(ts)},"timestamp":int(datetime.now().timestamp()*1000)}) + '\n')
+    # #endregion
 
     payload = {
         'exchange': exchange,

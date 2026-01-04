@@ -23,6 +23,8 @@ ENV/
 logs/
 build/
 dist/
+tmp/
+import_log.txt
 
 trade_logs/
 metrics/phase2_metrics/
