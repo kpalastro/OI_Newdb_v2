@@ -77,18 +77,18 @@ class KiteApp:
         Exchange = []
         for i in data[1:-1]:
             try:
-            row = i.split(",")
+                row = i.split(",")
                 # Skip rows that don't have enough columns (malformed CSV rows)
                 if len(row) < 12:
                     continue
                 
-            if exchange is None or exchange == row[11]:
-                Exchange.append({'instrument_token': int(row[0]), 'exchange_token': row[1], 'tradingsymbol': row[2],
-                                 'name': row[3][1:-1], 'last_price': float(row[4]),
-                                 'expiry': dateutil.parser.parse(row[5]).date() if row[5] != "" else None,
-                                 'strike': float(row[6]), 'tick_size': float(row[7]), 'lot_size': int(row[8]),
-                                 'instrument_type': row[9], 'segment': row[10],
-                                 'exchange': row[11]})
+                if exchange is None or exchange == row[11]:
+                    Exchange.append({'instrument_token': int(row[0]), 'exchange_token': row[1], 'tradingsymbol': row[2],
+                                     'name': row[3][1:-1], 'last_price': float(row[4]),
+                                     'expiry': dateutil.parser.parse(row[5]).date() if row[5] != "" else None,
+                                     'strike': float(row[6]), 'tick_size': float(row[7]), 'lot_size': int(row[8]),
+                                     'instrument_type': row[9], 'segment': row[10],
+                                     'exchange': row[11]})
             except (ValueError, IndexError, AttributeError) as e:
                 # Skip malformed rows silently (they're likely empty lines or corrupted data)
                 continue
