@@ -688,28 +688,28 @@ def _train_rl_segment(
                 max_steps_per_episode = min(len(val_df), 1000)  # Safety limit
                 
                 try:
-                for episode_num in range(5):  # 5 evaluation episodes
-                    obs, _ = val_env.reset()
-                    episode_reward = 0.0
-                    done = False
-                    truncated = False
-                    steps = 0
+                    for episode_num in range(5):  # 5 evaluation episodes
+                        obs, _ = val_env.reset()
+                        episode_reward = 0.0
+                        done = False
+                        truncated = False
+                        steps = 0
+                        
+                        while not (done or truncated) and steps < max_steps_per_episode:
+                            action, _ = model.predict(obs, deterministic=True)
+                            obs, reward, done, truncated, _ = val_env.step(action)
+                            episode_reward += reward
+                            steps += 1
+                        
+                        if steps >= max_steps_per_episode:
+                            LOGGER.warning(f"RL Optuna trial episode {episode_num} hit step limit ({max_steps_per_episode})")
+                        
+                        total_reward += episode_reward
+                        episodes += 1
                     
-                    while not (done or truncated) and steps < max_steps_per_episode:
-                        action, _ = model.predict(obs, deterministic=True)
-                        obs, reward, done, truncated, _ = val_env.step(action)
-                        episode_reward += reward
-                        steps += 1
-                    
-                    if steps >= max_steps_per_episode:
-                        LOGGER.warning(f"RL Optuna trial episode {episode_num} hit step limit ({max_steps_per_episode})")
-                    
-                    total_reward += episode_reward
-                    episodes += 1
-                
-                avg_reward = total_reward / max(episodes, 1)
-                LOGGER.info(f"RL Optuna trial {trial.number}: Completed with avg reward: {avg_reward:.3f}")
-                return avg_reward
+                    avg_reward = total_reward / max(episodes, 1)
+                    LOGGER.info(f"RL Optuna trial {trial.number}: Completed with avg reward: {avg_reward:.3f}")
+                    return avg_reward
                 finally:
                     # Clean up resources after evaluation is complete
                     try:
