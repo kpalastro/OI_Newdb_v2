@@ -347,6 +347,7 @@ io_thread = None
 header_update_thread = None
 macro_save_thread = None
 system_health_thread = None
+periodic_minute_save_thread = None
 exchange_update_threads: Dict[str, Thread] = {}
 # Multi-expiry collector services (one per exchange)
 multi_expiry_collectors: Dict[str, MultiExpiryCollectorService] = {}
@@ -424,7 +425,7 @@ def start_background_threads():
     """Start supporting background workers after system initialization."""
     global background_threads_started, io_thread, feature_worker
     global feature_result_thread, header_update_thread, macro_save_thread, system_health_thread
-    global multi_expiry_collectors
+    global periodic_minute_save_thread, multi_expiry_collectors
 
     with background_threads_lock:
         if background_threads_started:
@@ -485,6 +486,16 @@ def start_background_threads():
             )
             system_health_thread.start()
             logging.info("✓ System health metrics thread started")
+
+        # CRITICAL: Start periodic minute save thread to ensure minute-by-minute saves
+        if not periodic_minute_save_thread or not periodic_minute_save_thread.is_alive():
+            periodic_minute_save_thread = Thread(
+                target=_periodic_minute_save_thread_func,
+                daemon=True,
+                name='PeriodicMinuteSaveThread'
+            )
+            periodic_minute_save_thread.start()
+            logging.info("✓ Periodic minute save thread started (backup mechanism)")
 
         for ex in ALL_EXCHANGES:
             thread = exchange_update_threads.get(ex)
@@ -1185,6 +1196,76 @@ def _emit_health_metrics(handler: ExchangeDataHandler, now: datetime) -> None:
     return
 
 
+def _periodic_minute_save_thread_func():
+    """
+    Timer-based save thread that ensures minute-by-minute saves regardless of feature result timing.
+    This is a backup mechanism to ensure we don't miss saves if feature results are delayed.
+    """
+    logging.info("Periodic minute save thread started")
+    config = get_config()
+    
+    while not shutdown_event.is_set():
+        try:
+            now = now_ist()
+            current_minute = now.replace(second=0, microsecond=0)
+            
+            # Only run during market hours
+            if not _is_market_open(now):
+                time.sleep(60)  # Check every minute when market is closed
+                continue
+            
+            # Check each exchange to see if a save is needed
+            for exchange, handler in exchange_handlers.items():
+                try:
+                    with handler.lock:
+                        # Check if we need to save for this exchange
+                        if not hasattr(handler, 'last_db_save_time') or handler.last_db_save_time is None:
+                            continue  # Skip if not initialized yet
+                        
+                        last_save_ist = to_ist(handler.last_db_save_time) if handler.last_db_save_time.tzinfo is None else handler.last_db_save_time
+                        last_save_minute = last_save_ist.replace(second=0, microsecond=0)
+                        
+                        # If we've moved to a new minute and haven't saved yet, force a save
+                        if current_minute > last_save_minute:
+                            # Get current state from handler
+                            calls = handler.latest_oi_data.get('call_options', [])
+                            puts = handler.latest_oi_data.get('put_options', [])
+                            spot_ltp = handler.latest_oi_data.get('underlying_price')
+                            atm = handler.latest_oi_data.get('atm_strike')
+                            
+                            if spot_ltp and atm:
+                                # Force a save with current handler state
+                                # Use empty ML features dict - this ensures we have a record
+                                schedule_db_save(
+                                    exchange,
+                                    calls if calls else [],
+                                    puts if puts else [],
+                                    underlying_price=spot_ltp,
+                                    atm_strike=atm,
+                                    expiry_date=handler.expiry_date,
+                                    timestamp=current_minute,
+                                    vix_value=latest_vix_data.get('value'),
+                                    underlying_future_price=handler.latest_oi_data.get('underlying_future_price'),
+                                    underlying_future_oi=handler.latest_oi_data.get('underlying_future_oi'),
+                                    ml_features_dict={}  # Empty - will be populated by next feature result
+                                )
+                                handler.last_db_save_time = current_minute
+                                logging.info(f"[{exchange}] ⏰ Timer-based save triggered for minute {current_minute} (backup mechanism)")
+                except Exception as e:
+                    logging.error(f"[{exchange}] Error in periodic minute save: {e}", exc_info=True)
+            
+            # Sleep until next minute boundary
+            # Calculate seconds until next minute
+            seconds_until_next_minute = 60 - now.second
+            time.sleep(seconds_until_next_minute + 1)  # +1 to ensure we're past the minute boundary
+            
+        except Exception as e:
+            logging.error(f"Error in periodic minute save thread: {e}", exc_info=True)
+            time.sleep(60)  # Sleep 1 minute on error
+    
+    logging.info("Periodic minute save thread finished")
+
+
 def periodic_header_update_thread():
     """Periodic thread to force header updates every 3 seconds."""
     error_count = {}
@@ -1255,6 +1336,8 @@ def periodic_header_update_thread():
 def feature_result_consumer():
     """Consume feature results and apply them to live handlers."""
     config = get_config()  # Get config once at function start
+    logging.info("Feature result consumer thread started")
+    result_count = 0
     while not shutdown_event.is_set():
         try:
             result: ResultJob = result_queue.get(timeout=1)
@@ -1264,10 +1347,19 @@ def feature_result_consumer():
         if result is None:
             break
 
+        result_count += 1
+        if result_count % 10 == 0:  # Log every 10th result
+            logging.info(f"Feature result consumer: Processed {result_count} results so far")
+
         handler = exchange_handlers.get(result.exchange)
         if handler is None:
+            logging.warning(f"Feature result consumer: No handler found for exchange {result.exchange}")
             continue
 
+        # CRITICAL: Calculate result_minute OUTSIDE the lock so it's accessible in save section
+        result_timestamp_ist = to_ist(result.timestamp) if result.timestamp.tzinfo is None else result.timestamp
+        result_minute = result_timestamp_ist.replace(second=0, microsecond=0)
+        
         try:
             # First, update handler state from latest result
             with handler.lock:
@@ -1282,7 +1374,58 @@ def feature_result_consumer():
                 if result.ml_signal != 'HOLD':
                     handler.last_ml_signal_time = result.timestamp
 
-                should_save = (result.timestamp - handler.last_db_save_time).total_seconds() >= config.db_save_interval_seconds
+                # CRITICAL FIX: Initialize last_db_save_time if not set
+                if not hasattr(handler, 'last_db_save_time') or handler.last_db_save_time is None:
+                    # Initialize to one minute before current minute to trigger immediate save
+                    handler.last_db_save_time = result_minute - timedelta(minutes=1)
+                    logging.info(f"[{result.exchange}] Initialized last_db_save_time to {handler.last_db_save_time}")
+
+                # CRITICAL FIX: Ensure both timestamps are IST-aware before comparison
+                # Round last_db_save_time to minute boundary for comparison
+                last_save_time_ist = to_ist(handler.last_db_save_time) if handler.last_db_save_time.tzinfo is None else handler.last_db_save_time
+                last_save_minute = last_save_time_ist.replace(second=0, microsecond=0)
+                
+                # Save if we've moved to a new minute (minute-by-minute saves)
+                # Use > to ensure we only save once per minute (on the first result of each new minute)
+                should_save = result_minute > last_save_minute
+                
+                # Log save decision for debugging (log every time should_save is True, or once per minute when False)
+                if should_save:
+                    logging.info(f"[{result.exchange}] ✓ Save triggered: result_minute={result_minute}, last_save_minute={last_save_minute}, "
+                                f"has_ml_features={bool(result.ml_features)}")
+                else:
+                    # Log occasionally when save is skipped (to debug why saves aren't happening)
+                    if not hasattr(feature_result_consumer, '_skip_log_count'):
+                        feature_result_consumer._skip_log_count = {}
+                    skip_count = feature_result_consumer._skip_log_count.get(result.exchange, 0)
+                    feature_result_consumer._skip_log_count[result.exchange] = skip_count + 1
+                    if skip_count % 12 == 0:  # Log every 12th skip (roughly once per minute if results come every 5 seconds)
+                        logging.debug(f"[{result.exchange}] Save skipped: result_minute={result_minute}, last_save_minute={last_save_minute} "
+                                    f"(already saved this minute)")
+                
+                # Log save decision for debugging (only occasionally to avoid spam)
+                # Wrap in try-except to prevent logging errors from breaking the main flow
+                try:
+                    if not hasattr(feature_result_consumer, '_last_log_time'):
+                        feature_result_consumer._last_log_time = {}
+                    last_log = feature_result_consumer._last_log_time.get(result.exchange)
+                    # Ensure last_log is timezone-aware if it exists, or use a very old IST-aware datetime
+                    if last_log is None:
+                        # Use a very old IST-aware datetime instead of datetime.min
+                        last_log = to_ist(datetime(2000, 1, 1))
+                    elif last_log.tzinfo is None:
+                        # Convert naive datetime to IST-aware
+                        last_log = to_ist(last_log)
+                        feature_result_consumer._last_log_time[result.exchange] = last_log
+                    
+                    if (result_timestamp_ist - last_log).total_seconds() >= 60:  # Log once per minute
+                        logging.info(f"[{result.exchange}] Save check: should_save={should_save}, "
+                                   f"time_since_last={(result_timestamp_ist - last_save_time_ist).total_seconds():.1f}s, "
+                                   f"interval={config.db_save_interval_seconds}s, has_ml_features={bool(result.ml_features)}")
+                        feature_result_consumer._last_log_time[result.exchange] = result_timestamp_ist
+                except Exception as log_error:
+                    # Don't let logging errors break the main flow
+                    logging.debug(f"[{result.exchange}] Logging error (non-fatal): {log_error}")
         except Exception as e:
             logging.error(f"[{result.exchange}] Result application failed: {e}", exc_info=True)
             continue
@@ -1528,98 +1671,129 @@ def feature_result_consumer():
                 # CRITICAL FIX: Filter only changed options to avoid duplicate rows
                 changed, current_state, changed_calls, changed_puts = check_for_oi_changes(handler, result.calls, result.puts)
                 
-                # Only proceed if something actually changed
-                if changed:
-                    db_write_success = False
-                    try:
-                        if result.ml_features:
-                            try:
-                                db.save_order_book_depth_snapshot(
-                                    exchange=_resolve_macro_exchange(result.exchange),
-                                    depth_buy_total=result.ml_features.get('depth_buy_total', 0.0),
-                                    depth_sell_total=result.ml_features.get('depth_sell_total', 0.0),
-                                    depth_imbalance_ratio=result.ml_features.get('depth_imbalance_ratio', 0.0),
-                                    timestamp=result.timestamp,
-                                    source='runtime'
+                # CRITICAL FIX: Always save ML features even if nothing changed
+                # ML features need minute-by-minute snapshots for training for ALL exchanges
+                # Only skip option snapshots if nothing changed, but always save ml_features
+                db_write_success = False
+                try:
+                    if result.ml_features:
+                        try:
+                            db.save_order_book_depth_snapshot(
+                                exchange=_resolve_macro_exchange(result.exchange),
+                                depth_buy_total=result.ml_features.get('depth_buy_total', 0.0),
+                                depth_sell_total=result.ml_features.get('depth_sell_total', 0.0),
+                                depth_imbalance_ratio=result.ml_features.get('depth_imbalance_ratio', 0.0),
+                                timestamp=result.timestamp,
+                                source='runtime'
+                            )
+                        except Exception as depth_exc:
+                            logging.debug(f"[{result.exchange}] Depth snapshot skipped: {depth_exc}")
+
+                        # Save VIX term structure
+                        try:
+                            vix_val_term = app_manager.latest_vix_data.get('value')
+                            if vix_val_term:
+                                vix_exchange = _resolve_macro_exchange(result.exchange)
+                                # Only calculate metrics if we have a valid VIX
+                                vix_ma_5d, vix_ma_20d, vix_trend_1d, vix_trend_5d = calculate_vix_historical_metrics(vix_exchange, current_vix=vix_val_term)
+                                
+                                # Use in-memory realized vol if available, else fallback to DB
+                                realized_vol = result.ml_features.get('realized_vol_5m')
+                                if realized_vol is None or realized_vol == 0:
+                                    realized_vol = get_realized_volatility(vix_exchange)
+                                
+                                record_vix_term_structure(
+                                    exchange=vix_exchange,
+                                    current_vix=vix_val_term,
+                                    realized_vol=realized_vol,
+                                    vix_ma_5d=vix_ma_5d,
+                                    vix_ma_20d=vix_ma_20d,
+                                    vix_trend_1d=vix_trend_1d,
+                                    vix_trend_5d=vix_trend_5d,
+                                    source="realtime_snapshot",
+                                    timestamp=result.timestamp
                                 )
-                            except Exception as depth_exc:
-                                logging.debug(f"[{result.exchange}] Depth snapshot skipped: {depth_exc}")
+                        except Exception as vix_exc:
+                            logging.debug(f"[{result.exchange}] VIX snapshot skipped: {vix_exc}")
 
-                            # Save VIX term structure
-                            try:
-                                vix_val_term = app_manager.latest_vix_data.get('value')
-                                if vix_val_term:
-                                    vix_exchange = _resolve_macro_exchange(result.exchange)
-                                    # Only calculate metrics if we have a valid VIX
-                                    vix_ma_5d, vix_ma_20d, vix_trend_1d, vix_trend_5d = calculate_vix_historical_metrics(vix_exchange, current_vix=vix_val_term)
-                                    
-                                    # Use in-memory realized vol if available, else fallback to DB
-                                    realized_vol = result.ml_features.get('realized_vol_5m')
-                                    if realized_vol is None or realized_vol == 0:
-                                        realized_vol = get_realized_volatility(vix_exchange)
-                                    
-                                    record_vix_term_structure(
-                                        exchange=vix_exchange,
-                                        current_vix=vix_val_term,
-                                        realized_vol=realized_vol,
-                                        vix_ma_5d=vix_ma_5d,
-                                        vix_ma_20d=vix_ma_20d,
-                                        vix_trend_1d=vix_trend_1d,
-                                        vix_trend_5d=vix_trend_5d,
-                                        source="realtime_snapshot",
-                                        timestamp=result.timestamp
-                                    )
-                            except Exception as vix_exc:
-                                logging.debug(f"[{result.exchange}] VIX snapshot skipped: {vix_exc}")
-
-                        # CRITICAL FIX: Always save ml_features even if no options changed
-                        # ML features need minute-by-minute snapshots for training
-                        # Only skip option snapshots if nothing changed, but always save ml_features
-                        if changed_calls or changed_puts:
-                            schedule_db_save(
-                                result.exchange,
-                                changed_calls,
-                                changed_puts,
-                                underlying_price=result.spot_ltp,
-                                atm_strike=result.atm,
-                                expiry_date=handler.expiry_date,
-                                timestamp=result.timestamp,
-                                vix_value=latest_vix_data.get('value'),
-                                underlying_future_price=result.futures_price,
-                                underlying_future_oi=result.fut_oi,
-                                ml_features_dict=result.ml_features
-                            )
-                            # Log how many rows we are saving
-                            logging.debug(f"[{result.exchange}] Saving {len(changed_calls)} calls and {len(changed_puts)} puts with changed OI")
-                        elif result.ml_features:
-                            # No options changed, but save ML features anyway
-                            # Pass empty lists for calls/puts - save_option_chain_snapshot will skip option snapshots
-                            # but still save ml_features
-                            schedule_db_save(
-                                result.exchange,
-                                [],  # Empty - will skip option snapshots
-                                [],  # Empty - will skip option snapshots
-                                underlying_price=result.spot_ltp,
-                                atm_strike=result.atm,
-                                expiry_date=handler.expiry_date,
-                                timestamp=result.timestamp,
-                                vix_value=latest_vix_data.get('value'),
-                                underlying_future_price=result.futures_price,
-                                underlying_future_oi=result.fut_oi,
-                                ml_features_dict=result.ml_features
-                            )
-                            logging.debug(f"[{result.exchange}] No OI changes, but saving ML features for training")
-                            # Log how many rows we are saving
-                            logging.debug(f"[{result.exchange}] Saving {len(changed_calls)} calls and {len(changed_puts)} puts with changed OI")
-                        else:
-                            logging.debug(f"[{result.exchange}] 'changed' flag true but no options in list? (should not happen)")
-
+                    # CRITICAL FIX: Always save ml_features for ALL exchanges, even if no options changed
+                    # Save option snapshots only if OI changed, but always save ML features
+                    if changed and (changed_calls or changed_puts):
+                        # OI changed - save both option snapshots and ML features
+                        schedule_db_save(
+                            result.exchange,
+                            changed_calls,
+                            changed_puts,
+                            underlying_price=result.spot_ltp,
+                            atm_strike=result.atm,
+                            expiry_date=handler.expiry_date,
+                            timestamp=result.timestamp,
+                            vix_value=latest_vix_data.get('value'),
+                            underlying_future_price=result.futures_price,
+                            underlying_future_oi=result.fut_oi,
+                            ml_features_dict=result.ml_features
+                        )
+                        logging.info(f"[{result.exchange}] ✓ Saving {len(changed_calls)} calls and {len(changed_puts)} puts with changed OI + ML features for minute {result_minute}")
+                    elif result.ml_features:
+                        # No OI changes, but save ML features anyway for ALL exchanges
+                        # Pass empty lists for calls/puts - save_option_chain_snapshot will skip option snapshots
+                        # but still save ml_features
+                        schedule_db_save(
+                            result.exchange,
+                            [],  # Empty - will skip option snapshots
+                            [],  # Empty - will skip option snapshots
+                            underlying_price=result.spot_ltp,
+                            atm_strike=result.atm,
+                            expiry_date=handler.expiry_date,
+                            timestamp=result.timestamp,
+                            vix_value=latest_vix_data.get('value'),
+                            underlying_future_price=result.futures_price,
+                            underlying_future_oi=result.fut_oi,
+                            ml_features_dict=result.ml_features
+                        )
+                        logging.info(f"[{result.exchange}] ✓ Saving ML features (no OI changes) for minute {result_minute}")
+                    else:
+                        # CRITICAL FIX: Even if ML features are missing, we should still save to ensure minute-by-minute records
+                        # Use empty dict for ML features - the save function will handle it
+                        # Get current calls/puts from handler's latest_oi_data as fallback
                         with handler.lock:
+                            fallback_calls = handler.latest_oi_data.get('call_options', [])
+                            fallback_puts = handler.latest_oi_data.get('put_options', [])
+                            fallback_spot = handler.latest_oi_data.get('underlying_price', result.spot_ltp)
+                            fallback_atm = handler.latest_oi_data.get('atm_strike', result.atm)
+                        
+                        # Save with empty ML features dict - this ensures we have a record for this minute
+                        schedule_db_save(
+                            result.exchange,
+                            fallback_calls if fallback_calls else [],  # Use fallback if available
+                            fallback_puts if fallback_puts else [],  # Use fallback if available
+                            underlying_price=fallback_spot or result.spot_ltp,
+                            atm_strike=fallback_atm or result.atm,
+                            expiry_date=handler.expiry_date,
+                            timestamp=result.timestamp,
+                            vix_value=latest_vix_data.get('value'),
+                            underlying_future_price=result.futures_price,
+                            underlying_future_oi=result.fut_oi,
+                            ml_features_dict={}  # Empty dict - will save with default/zero values
+                        )
+                        logging.warning(f"[{result.exchange}] ⚠ Saving with empty ML features for minute {result_minute} (ML features missing in result)")
+
+                    # Update saved state regardless of whether we saved options or just ML features
+                    # CRITICAL: Update last_db_save_time to the rounded minute to ensure minute-by-minute saves
+                    # IMPORTANT: Only update if we actually saved (should_save was True)
+                    with handler.lock:
+                        if changed:
                             handler.last_saved_oi_state = current_state
-                            handler.last_db_save_time = result.timestamp
-                        db_write_success = True
-                    except Exception as db_exc:
-                        logging.error(f"[{result.exchange}] Database save failed: {db_exc}")
+                        # Round result.timestamp to minute boundary for minute-by-minute saves
+                        # Only update if we actually saved (this prevents updating when save was skipped)
+                        if should_save:
+                            result_timestamp_ist = to_ist(result.timestamp) if result.timestamp.tzinfo is None else result.timestamp
+                            result_minute = result_timestamp_ist.replace(second=0, microsecond=0)
+                            handler.last_db_save_time = result_minute
+                            logging.debug(f"[{result.exchange}] Updated last_db_save_time to {result_minute} after save")
+                    db_write_success = True
+                except Exception as db_exc:
+                    logging.error(f"[{result.exchange}] Database save failed: {db_exc}")
 
                     try:
                         collector = get_metrics_collector(result.exchange)

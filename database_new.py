@@ -667,10 +667,19 @@ def save_option_chain_snapshot(exchange, call_options, put_options, underlying_p
                     oi_changed = True
                     break
             
-            if not oi_changed and last_oi:
-                logging.info(f"{exchange}: ⊘ OI unchanged - skipping save")
-                release_db_connection(conn)
-                return
+            # CRITICAL FIX: Always save ML features even if OI hasn't changed
+            # ML features need minute-by-minute snapshots for training
+            # Only skip option snapshots if nothing changed, but always save ml_features
+            # IMPORTANT: Even if ml_features_dict is empty, we should save to ensure minute-by-minute records
+            # Empty ML features will be saved with default/zero values
+            if not oi_changed and last_oi and not ml_features_dict:
+                logging.debug(f"{exchange}: ⊘ OI unchanged and no ML features - will save with empty ML features for minute-by-minute records")
+                # Don't return - continue to save ML features section with empty dict
+            
+            # If OI hasn't changed but we have ML features, skip option snapshots but save ML features
+            if not oi_changed and last_oi and ml_features_dict:
+                logging.debug(f"{exchange}: ⊘ OI unchanged but saving ML features for training")
+                # Skip option snapshot saving, but continue to ML features section below
             
             # Save strike-level data
             records = []
@@ -695,7 +704,9 @@ def save_option_chain_snapshot(exchange, call_options, put_options, underlying_p
             # Note: The INSERT statement for snapshots does not need to change
             # because we provide all the values explicitly. The DEFAULT only applies
             # if the column is omitted, which we are not doing.
-            if records:
+            # Only save option snapshots if OI changed (or if no previous OI exists)
+            # If OI hasn't changed but ML features are provided, skip option snapshots
+            if records and (oi_changed or not last_oi):
                 placeholders = ', '.join([_get_placeholder()] * len(records[0]))
                 
                 # PostgreSQL "INSERT ... ON CONFLICT"
@@ -723,8 +734,9 @@ def save_option_chain_snapshot(exchange, call_options, put_options, underlying_p
                 '''
                 cursor.executemany(query, records)
 
-            # Save ML features
-            if ml_features_dict:
+            # Save ML features - always save, even if empty dict, to ensure minute-by-minute records
+            # Empty dict will be saved with default/zero values
+            if ml_features_dict is not None:
                 ph = _get_placeholder()
                 
                 feature_payload = _serialize_feature_dict(ml_features_dict)
@@ -866,7 +878,10 @@ def save_option_chain_snapshot(exchange, call_options, put_options, underlying_p
             ''', (exchange, timestamp_iso, atm_strike, underlying_price, underlying_future_price, underlying_future_oi, current_time_iso))
             
             conn.commit()
-            logging.info(f"✓ Saved {len(records)} records + ML features for {exchange}")
+            if records:
+                logging.info(f"✓ Saved {len(records)} option records + ML features for {exchange}")
+            elif ml_features_dict:
+                logging.info(f"✓ Saved ML features for {exchange} (no OI changes, skipping option snapshots)")
             release_db_connection(conn)
             
             # After saving main features, try to update nse_next_* columns from multi-expiry data
