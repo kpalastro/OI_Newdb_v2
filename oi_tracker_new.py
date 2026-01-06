@@ -2639,11 +2639,14 @@ def io_writer_thread_func():
                 puts_count = len(data.get('put_options', []))
                 has_ml = bool(data.get('ml_features_dict'))
                 logging.info(f"[IOWriterThread] Processing db_snapshot for {exchange} at {timestamp} (calls={calls_count}, puts={puts_count}, ml_features={has_ml})")
+                save_start_time = time.time()
                 try:
                     db.save_option_chain_snapshot(**data)
-                    logging.info(f"[IOWriterThread] ✓ Completed db_snapshot for {exchange} at {timestamp}")
+                    save_duration = time.time() - save_start_time
+                    logging.info(f"[IOWriterThread] ✓ Completed db_snapshot for {exchange} at {timestamp} (took {save_duration:.2f}s)")
                 except Exception as save_err:
-                    logging.error(f"[IOWriterThread] ✗ Failed db_snapshot for {exchange} at {timestamp}: {save_err}", exc_info=True)
+                    save_duration = time.time() - save_start_time
+                    logging.error(f"[IOWriterThread] ✗ Failed db_snapshot for {exchange} at {timestamp} after {save_duration:.2f}s: {save_err}", exc_info=True)
             elif task_type == 'log_trade_entry':
                 _perform_log_trade_entry(data)
             elif task_type == 'log_trade_exit':
