@@ -1233,24 +1233,31 @@ def _periodic_minute_save_thread_func():
                             spot_ltp = handler.latest_oi_data.get('underlying_price')
                             atm = handler.latest_oi_data.get('atm_strike')
                             
-                            if spot_ltp and atm:
-                                # Force a save with current handler state
-                                # Use empty ML features dict - this ensures we have a record
-                                schedule_db_save(
-                                    exchange,
-                                    calls if calls else [],
-                                    puts if puts else [],
-                                    underlying_price=spot_ltp,
-                                    atm_strike=atm,
-                                    expiry_date=handler.expiry_date,
-                                    timestamp=current_minute,
-                                    vix_value=latest_vix_data.get('value'),
-                                    underlying_future_price=handler.latest_oi_data.get('underlying_future_price'),
-                                    underlying_future_oi=handler.latest_oi_data.get('underlying_future_oi'),
-                                    ml_features_dict={}  # Empty - will be populated by next feature result
-                                )
-                                handler.last_db_save_time = current_minute
-                                logging.info(f"[{exchange}] ⏰ Timer-based save triggered for minute {current_minute} (backup mechanism)")
+                            # CRITICAL FIX: Save even if spot_ltp or atm is missing - use fallback values
+                            # This ensures we don't skip saves when data is temporarily unavailable
+                            if not spot_ltp:
+                                # Try to get from latest tick data as fallback
+                                underlying_token = handler.underlying_token
+                                if underlying_token:
+                                    tick_data = handler.latest_tick_data.get(underlying_token, {})
+                                    spot_ltp = normalize_price(tick_data.get('last_price'))
+                            
+                            # Save regardless - use None if still missing (database will handle it)
+                            schedule_db_save(
+                                exchange,
+                                calls if calls else [],
+                                puts if puts else [],
+                                underlying_price=spot_ltp,  # Can be None
+                                atm_strike=atm,  # Can be None
+                                expiry_date=handler.expiry_date,
+                                timestamp=current_minute,
+                                vix_value=latest_vix_data.get('value'),
+                                underlying_future_price=handler.latest_oi_data.get('underlying_future_price'),
+                                underlying_future_oi=handler.latest_oi_data.get('underlying_future_oi'),
+                                ml_features_dict={}  # Empty - will be populated by next feature result
+                            )
+                            handler.last_db_save_time = current_minute
+                            logging.info(f"[{exchange}] ⏰ Timer-based save triggered for minute {current_minute} (backup mechanism)")
                 except Exception as e:
                     logging.error(f"[{exchange}] Error in periodic minute save: {e}", exc_info=True)
             
