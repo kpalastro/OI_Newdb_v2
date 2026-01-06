@@ -2635,12 +2635,15 @@ def io_writer_thread_func():
             if task_type == 'db_snapshot':
                 exchange = data.get('exchange', 'UNKNOWN')
                 timestamp = data.get('timestamp')
-                logging.debug(f"[IOWriterThread] Processing db_snapshot for {exchange} at {timestamp}")
+                calls_count = len(data.get('call_options', []))
+                puts_count = len(data.get('put_options', []))
+                has_ml = bool(data.get('ml_features_dict'))
+                logging.info(f"[IOWriterThread] Processing db_snapshot for {exchange} at {timestamp} (calls={calls_count}, puts={puts_count}, ml_features={has_ml})")
                 try:
                     db.save_option_chain_snapshot(**data)
-                    logging.debug(f"[IOWriterThread] ✓ Completed db_snapshot for {exchange}")
+                    logging.info(f"[IOWriterThread] ✓ Completed db_snapshot for {exchange} at {timestamp}")
                 except Exception as save_err:
-                    logging.error(f"[IOWriterThread] ✗ Failed db_snapshot for {exchange}: {save_err}", exc_info=True)
+                    logging.error(f"[IOWriterThread] ✗ Failed db_snapshot for {exchange} at {timestamp}: {save_err}", exc_info=True)
             elif task_type == 'log_trade_entry':
                 _perform_log_trade_entry(data)
             elif task_type == 'log_trade_exit':
@@ -2679,6 +2682,7 @@ def schedule_db_save(exchange: str, calls: list, puts: list, **kwargs):
         **kwargs,
     }
     io_queue.put(('db_snapshot', payload))
+    logging.info(f"[schedule_db_save] Queued db_snapshot for {exchange} at {ts} (calls={len(calls)}, puts={len(puts)}, ml_features={bool(kwargs.get('ml_features_dict'))})")
 
 def schedule_log_trade_entry(position: dict):
     """Schedule trade entry logging."""
