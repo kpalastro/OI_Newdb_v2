@@ -890,8 +890,27 @@ def save_option_chain_snapshot(exchange, call_options, put_options, underlying_p
             
             # After saving main features, try to update nse_next_* columns from multi-expiry data
             # This ensures real-time synchronization if multi-expiry data exists
+            # CRITICAL: Don't block the save - use a quick timeout
             try:
-                _update_ml_features_from_multi_expiry(exchange, timestamp_iso)
+                import threading
+                update_result = [None]
+                update_error = [None]
+                
+                def update_worker():
+                    try:
+                        _update_ml_features_from_multi_expiry(exchange, timestamp_iso)
+                        update_result[0] = True
+                    except Exception as e:
+                        update_error[0] = e
+                
+                update_thread = threading.Thread(target=update_worker, daemon=True)
+                update_thread.start()
+                update_thread.join(timeout=2.0)  # 2 second max
+                
+                if update_thread.is_alive():
+                    logging.debug(f"[{exchange}] Multi-expiry update timed out, continuing")
+                elif update_error[0]:
+                    logging.debug(f"Could not update nse_next_* from multi-expiry data: {update_error[0]}")
             except Exception as update_err:
                 # Log but don't fail the main save operation
                 logging.debug(f"Could not update nse_next_* from multi-expiry data: {update_err}")
