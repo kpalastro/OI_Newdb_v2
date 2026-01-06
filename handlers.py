@@ -68,6 +68,7 @@ class ExchangeDataHandler:
         self.ml_confidence = 0.0
         self.ml_rationale = 'Initializing...'
         self.ml_metadata = {}
+        self.ml_features: Dict[str, Any] = {}  # Store last ML features for periodic saves
         self.last_ml_signal_time: Optional[datetime] = None
         self.atm_shift_ewma: Optional[float] = None
 

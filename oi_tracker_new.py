@@ -1243,7 +1243,10 @@ def _periodic_minute_save_thread_func():
                                     spot_ltp = normalize_price(tick_data.get('last_price'))
                             
                             # Save regardless - use None if still missing (database will handle it)
-                            # CRITICAL: Always save even with empty data to ensure minute-by-minute records
+                            # CRITICAL: Use stored ML features from handler if available, otherwise empty dict
+                            # This ensures we save actual feature values instead of NULLs
+                            ml_features_to_save = handler.ml_features.copy() if handler.ml_features else {}
+                            
                             schedule_db_save(
                                 exchange,
                                 calls if calls else [],
@@ -1255,7 +1258,7 @@ def _periodic_minute_save_thread_func():
                                 vix_value=latest_vix_data.get('value'),
                                 underlying_future_price=handler.latest_oi_data.get('underlying_future_price'),
                                 underlying_future_oi=handler.latest_oi_data.get('underlying_future_oi'),
-                                ml_features_dict={}  # Empty - will save minute-by-minute record
+                                ml_features_dict=ml_features_to_save  # Use stored features or empty dict
                             )
                             handler.last_db_save_time = current_minute
                             logging.info(f"[{exchange}] ⏰ Timer-based save triggered for minute {current_minute} (backup mechanism)")
@@ -1376,6 +1379,9 @@ def feature_result_consumer():
                 handler.ml_confidence = result.ml_confidence
                 handler.ml_rationale = result.ml_rationale
                 handler.ml_metadata = result.ml_metadata
+                # CRITICAL: Store ML features so periodic save thread can use them
+                if result.ml_features:
+                    handler.ml_features = result.ml_features.copy()
                 handler.latest_oi_data['open_positions'] = list(handler.open_positions.values())
                 handler.latest_oi_data['total_mtm'] = handler.total_mtm
                 handler.latest_oi_data['closed_pnl'] = handler.closed_positions_pnl
