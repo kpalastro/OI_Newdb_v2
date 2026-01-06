@@ -749,16 +749,35 @@ def save_option_chain_snapshot(exchange, call_options, put_options, underlying_p
                 trin_100 = None
                 
                 try:
+                    # CRITICAL FIX: Match by minute with better tolerance and use latest available
+                    # Try exact minute match first, then fallback to nearest within 5 minutes
                     cursor.execute(f'''
                         SELECT sentiment_score_50, sentiment_score_100, trin_50, trin_100
                         FROM macro_signals
                         WHERE exchange = {ph}
                           AND DATE_TRUNC('minute', timestamp) = DATE_TRUNC('minute', {ph}::timestamp)
+                          AND sentiment_score_50 IS NOT NULL
+                          AND sentiment_score_100 IS NOT NULL
                         ORDER BY timestamp DESC
                         LIMIT 1
                     ''', (exchange, timestamp_iso))
                     
                     row = cursor.fetchone()
+                    if not row:
+                        # Fallback: Get nearest within 5 minutes if exact match not found
+                        cursor.execute(f'''
+                            SELECT sentiment_score_50, sentiment_score_100, trin_50, trin_100
+                            FROM macro_signals
+                            WHERE exchange = {ph}
+                              AND timestamp >= {ph}::timestamp - INTERVAL '5 minutes'
+                              AND timestamp <= {ph}::timestamp + INTERVAL '5 minutes'
+                              AND sentiment_score_50 IS NOT NULL
+                              AND sentiment_score_100 IS NOT NULL
+                            ORDER BY ABS(EXTRACT(EPOCH FROM (timestamp - {ph}::timestamp)))
+                            LIMIT 1
+                        ''', (exchange, timestamp_iso, timestamp_iso))
+                        row = cursor.fetchone()
+                    
                     if row:
                         sentiment_score_50 = row[0]
                         sentiment_score_100 = row[1]
@@ -766,19 +785,13 @@ def save_option_chain_snapshot(exchange, call_options, put_options, underlying_p
                         trin_100 = row[3]
                         logging.debug(f"[{exchange}] Fetched sentiment scores from macro_signals: score_50={sentiment_score_50}, score_100={sentiment_score_100}")
                     else:
-                        logging.debug(f"[{exchange}] No matching macro_signals found for timestamp {timestamp_iso}, using fallback values")
+                        logging.debug(f"[{exchange}] No matching macro_signals found for timestamp {timestamp_iso}, will use NULL (not fallback to ml_features_dict)")
                 except Exception as e:
                     logging.warning(f"[{exchange}] Could not fetch sentiment scores from macro_signals: {e}")
                 
-                # Fallback to ml_features_dict values if query fails or no match found
-                if sentiment_score_50 is None:
-                    sentiment_score_50 = ml_features_dict.get('macro_sentiment_score_50')
-                if sentiment_score_100 is None:
-                    sentiment_score_100 = ml_features_dict.get('macro_sentiment_score_100')
-                if trin_50 is None:
-                    trin_50 = ml_features_dict.get('macro_trin_50')
-                if trin_100 is None:
-                    trin_100 = ml_features_dict.get('macro_trin_100')
+                # CRITICAL FIX: Don't fallback to ml_features_dict - it has default 50.0 values
+                # Only use values from macro_signals, or leave as None (which is better than wrong default)
+                # The ml_features_dict fallback was causing 50.0 to be saved incorrectly
                 
                 # Sanitize all ML feature values to standard Python types to avoid "np.float64" db errors
                 # Use sentiment scores from macro_signals (fetched above) instead of ml_features_dict
