@@ -48,7 +48,10 @@ def calculate_vix_historical_metrics(exchange: str, current_vix: Optional[float]
         
         # If we have current VIX, append it to the dataframe for calculation
         if current_vix is not None:
-            new_row = pd.DataFrame({'timestamp': [datetime.now()], 'vix': [current_vix]})
+            # CRITICAL FIX: Use timezone-aware datetime to match database timestamps
+            from time_utils import now_ist
+            current_timestamp = now_ist()  # Timezone-aware IST datetime
+            new_row = pd.DataFrame({'timestamp': [current_timestamp], 'vix': [current_vix]})
             if df.empty:
                 df = new_row
             else:
@@ -57,9 +60,13 @@ def calculate_vix_historical_metrics(exchange: str, current_vix: Optional[float]
         if df.empty:
             return None, None, None, None
         
-        # Ensure proper sorting
+        # Ensure proper sorting and timezone consistency
         if 'timestamp' in df.columns:
              df['timestamp'] = pd.to_datetime(df['timestamp'])
+             # Ensure all timestamps are timezone-aware (convert naive to IST-aware)
+             if df['timestamp'].dt.tz is None:
+                 from time_utils import to_ist
+                 df['timestamp'] = df['timestamp'].apply(lambda x: to_ist(x) if x.tzinfo is None else x)
              df = df.sort_values('timestamp')
         
         vix_series = df['vix']

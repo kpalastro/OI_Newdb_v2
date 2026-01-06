@@ -1734,6 +1734,7 @@ def feature_result_consumer():
                                     timestamp=result.timestamp
                                 )
                         except Exception as vix_exc:
+                            logging.error(f"Error calculating VIX metrics: {vix_exc}", exc_info=True)
                             logging.debug(f"[{result.exchange}] VIX snapshot skipped: {vix_exc}")
 
                     # CRITICAL FIX: Always save ml_features for ALL exchanges, even if no options changed
@@ -2677,12 +2678,7 @@ def schedule_db_save(exchange: str, calls: list, puts: list, **kwargs):
         )
         return
 
-    # #region agent log
-    import json
-    from datetime import datetime
-    with open('/Users/kpal/projects/dilip/OI_Newdb_v2/.cursor/debug.log', 'a') as f:
-        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"F","location":"oi_tracker_new.py:2426","message":"schedule_db_save called","data":{"exchange":exchange,"calls_count":len(calls),"puts_count":len(puts),"has_ml_features":kwargs.get('ml_features_dict') is not None,"timestamp":str(ts)},"timestamp":int(datetime.now().timestamp()*1000)}) + '\n')
-    # #endregion
+    # Debug logging removed - was causing FileNotFoundError in production
 
     payload = {
         'exchange': exchange,
