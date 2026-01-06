@@ -1243,6 +1243,7 @@ def _periodic_minute_save_thread_func():
                                     spot_ltp = normalize_price(tick_data.get('last_price'))
                             
                             # Save regardless - use None if still missing (database will handle it)
+                            # CRITICAL: Always save even with empty data to ensure minute-by-minute records
                             schedule_db_save(
                                 exchange,
                                 calls if calls else [],
@@ -1254,7 +1255,7 @@ def _periodic_minute_save_thread_func():
                                 vix_value=latest_vix_data.get('value'),
                                 underlying_future_price=handler.latest_oi_data.get('underlying_future_price'),
                                 underlying_future_oi=handler.latest_oi_data.get('underlying_future_oi'),
-                                ml_features_dict={}  # Empty - will be populated by next feature result
+                                ml_features_dict={}  # Empty - will save minute-by-minute record
                             )
                             handler.last_db_save_time = current_minute
                             logging.info(f"[{exchange}] ⏰ Timer-based save triggered for minute {current_minute} (backup mechanism)")

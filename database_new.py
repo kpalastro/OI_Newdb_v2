@@ -880,8 +880,12 @@ def save_option_chain_snapshot(exchange, call_options, put_options, underlying_p
             conn.commit()
             if records:
                 logging.info(f"✓ Saved {len(records)} option records + ML features for {exchange}")
-            elif ml_features_dict:
-                logging.info(f"✓ Saved ML features for {exchange} (no OI changes, skipping option snapshots)")
+            elif ml_features_dict is not None:
+                # Log even if ml_features_dict is empty - we still saved a record
+                if ml_features_dict:
+                    logging.info(f"✓ Saved ML features for {exchange} (no OI changes, skipping option snapshots)")
+                else:
+                    logging.info(f"✓ Saved ML features record for {exchange} (empty features, minute-by-minute backup)")
             release_db_connection(conn)
             
             # After saving main features, try to update nse_next_* columns from multi-expiry data
@@ -893,8 +897,13 @@ def save_option_chain_snapshot(exchange, call_options, put_options, underlying_p
                 logging.debug(f"Could not update nse_next_* from multi-expiry data: {update_err}")
             
         except Exception as e:
-            logging.error(f"Error saving snapshot: {e}", exc_info=True)
+            logging.error(f"[{exchange}] Error saving snapshot at {timestamp_iso if 'timestamp_iso' in locals() else 'unknown'}: {e}", exc_info=True)
+            logging.error(f"[{exchange}] Save attempt details: calls={len(call_options) if call_options else 0}, puts={len(put_options) if put_options else 0}, has_ml_features={ml_features_dict is not None}")
             if 'conn' in locals():
+                try:
+                    conn.rollback()
+                except:
+                    pass
                 release_db_connection(conn) # Ensure release on error
 
 
