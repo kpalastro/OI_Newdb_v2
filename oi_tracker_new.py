@@ -2627,7 +2627,14 @@ def io_writer_thread_func():
             
             task_type, data = task
             if task_type == 'db_snapshot':
-                db.save_option_chain_snapshot(**data)
+                exchange = data.get('exchange', 'UNKNOWN')
+                timestamp = data.get('timestamp')
+                logging.debug(f"[IOWriterThread] Processing db_snapshot for {exchange} at {timestamp}")
+                try:
+                    db.save_option_chain_snapshot(**data)
+                    logging.debug(f"[IOWriterThread] ✓ Completed db_snapshot for {exchange}")
+                except Exception as save_err:
+                    logging.error(f"[IOWriterThread] ✗ Failed db_snapshot for {exchange}: {save_err}", exc_info=True)
             elif task_type == 'log_trade_entry':
                 _perform_log_trade_entry(data)
             elif task_type == 'log_trade_exit':
