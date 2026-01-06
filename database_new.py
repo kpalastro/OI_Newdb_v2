@@ -775,7 +775,7 @@ def save_option_chain_snapshot(exchange, call_options, put_options, underlying_p
                               AND sentiment_score_100 IS NOT NULL
                             ORDER BY ABS(EXTRACT(EPOCH FROM (timestamp - {ph}::timestamp)))
                             LIMIT 1
-                        ''', (exchange, timestamp_iso, timestamp_iso))
+                        ''', (exchange, timestamp_iso, timestamp_iso, timestamp_iso))
                         row = cursor.fetchone()
                     
                     if row:
