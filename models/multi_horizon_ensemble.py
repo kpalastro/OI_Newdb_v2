@@ -199,6 +199,23 @@ class MultiHorizonEnsemble:
                         
                     if fv.ndim == 2:
                         fv = fv[0] # Take first row if batch
+                    
+                    # CRITICAL FIX: Align feature vector to model's expected dimension
+                    # Get expected feature_dim from model's embedding layer
+                    expected_dim = self.expiry_model.embedding.weight.shape[1]
+                    actual_dim = len(fv)
+                    
+                    if actual_dim != expected_dim:
+                        # Trim or pad to match expected dimension
+                        if actual_dim > expected_dim:
+                            # Trim excess features (take first N features)
+                            fv = fv[:expected_dim]
+                            logging.debug(f"Expiry model: Trimmed feature vector from {actual_dim} to {expected_dim} features")
+                        else:
+                            # Pad with zeros if fewer features (shouldn't happen, but handle gracefully)
+                            padding = np.zeros(expected_dim - actual_dim)
+                            fv = np.concatenate([fv, padding])
+                            logging.debug(f"Expiry model: Padded feature vector from {actual_dim} to {expected_dim} features")
                         
                     try:
                         pred = self.expiry_model.predict(fv)
@@ -208,7 +225,7 @@ class MultiHorizonEnsemble:
                             'confidence': max(pred['probabilities'])
                         })
                     except RuntimeError as re:
-                        # Catch shape mismatches (e.g. 117 features vs 64 expected)
+                        # Catch shape mismatches (shouldn't happen after alignment, but keep as safety)
                         logging.warning(f"Expiry model shape mismatch (safely falling back to swing): {re}")
                         horizon = 'swing'
                         result['horizon'] = 'swing'
