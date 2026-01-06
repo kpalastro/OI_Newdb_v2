@@ -734,9 +734,9 @@ def save_option_chain_snapshot(exchange, call_options, put_options, underlying_p
                 '''
                 cursor.executemany(query, records)
 
-            # Save ML features - always save, even if empty dict, to ensure minute-by-minute records
-            # Empty dict will be saved with default/zero values
-            if ml_features_dict is not None:
+            # Save ML features - only save if we have actual features (not None, not empty)
+            # Don't save empty dicts as they result in all NULL values
+            if ml_features_dict is not None and ml_features_dict:
                 ph = _get_placeholder()
                 
                 feature_payload = _serialize_feature_dict(ml_features_dict)
