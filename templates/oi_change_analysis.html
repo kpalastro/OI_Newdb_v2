@@ -1,0 +1,727 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OI Change Analysis Dashboard</title>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+            color: #e2e8f0;
+            padding: 20px;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .header h1 {
+            color: #60a5fa;
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+        }
+        .header p {
+            color: #94a3b8;
+            font-size: 1.1rem;
+        }
+        .controls {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            justify-content: center;
+            background: rgba(30, 41, 59, 0.8);
+            padding: 20px;
+            border-radius: 10px;
+        }
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        .control-group label {
+            font-size: 0.9rem;
+            color: #94a3b8;
+        }
+        .control-group select,
+        .control-group input {
+            padding: 8px 12px;
+            border: 1px solid #475569;
+            border-radius: 5px;
+            background: #1e293b;
+            color: #e2e8f0;
+            font-size: 1rem;
+        }
+        .control-group select:focus,
+        .control-group input:focus {
+            outline: none;
+            border-color: #60a5fa;
+        }
+        .control-group input[type="date"] {
+            min-width: 150px;
+        }
+        .control-group input[type="date"]::-webkit-calendar-picker-indicator {
+            filter: invert(1);
+            cursor: pointer;
+        }
+        #datePresets button {
+            padding: 6px 12px;
+            font-size: 0.85rem;
+            background: #475569;
+            color: #e2e8f0;
+            border: 1px solid #64748b;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        #datePresets button:hover {
+            background: #64748b;
+            border-color: #60a5fa;
+        }
+        .control-group input[type="checkbox"] {
+            width: auto;
+            margin-top: 8px;
+        }
+        button {
+            padding: 10px 20px;
+            background: #3b82f6;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 1rem;
+            font-weight: 600;
+            transition: background 0.3s;
+        }
+        button:hover {
+            background: #2563eb;
+        }
+        button:disabled {
+            background: #475569;
+            cursor: not-allowed;
+        }
+        .status {
+            text-align: center;
+            padding: 10px;
+            margin-bottom: 20px;
+            border-radius: 5px;
+            font-weight: 600;
+        }
+        .status.loading {
+            background: rgba(59, 130, 246, 0.2);
+            color: #60a5fa;
+        }
+        .status.error {
+            background: rgba(239, 68, 68, 0.2);
+            color: #f87171;
+        }
+        .status.success {
+            background: rgba(34, 197, 94, 0.2);
+            color: #4ade80;
+        }
+        .chart-container {
+            background: rgba(30, 41, 59, 0.8);
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+        .chart-title {
+            font-size: 1.3rem;
+            font-weight: 600;
+            margin-bottom: 15px;
+            color: #60a5fa;
+            border-bottom: 2px solid #475569;
+            padding-bottom: 10px;
+        }
+        .summary-cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .summary-card {
+            background: rgba(30, 41, 59, 0.8);
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+        }
+        .summary-card .label {
+            font-size: 0.9rem;
+            color: #94a3b8;
+            margin-bottom: 8px;
+        }
+        .summary-card .value {
+            font-size: 1.8rem;
+            font-weight: 700;
+        }
+        .summary-card.bullish .value {
+            color: #4ade80;
+        }
+        .summary-card.bearish .value {
+            color: #f87171;
+        }
+        .summary-card.neutral .value {
+            color: #94a3b8;
+        }
+        .exchange-tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        .exchange-tab {
+            padding: 10px 20px;
+            background: rgba(30, 41, 59, 0.8);
+            border: 2px solid #475569;
+            border-radius: 5px;
+            color: #e2e8f0;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s;
+        }
+        .exchange-tab:hover {
+            border-color: #60a5fa;
+            background: rgba(59, 130, 246, 0.2);
+        }
+        .exchange-tab.active {
+            border-color: #60a5fa;
+            background: #3b82f6;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>📈 OI Change Analysis Dashboard</h1>
+        <p>Visualize Next OI Change Metrics Across All Exchanges</p>
+    </div>
+
+    <div class="controls">
+        <div class="control-group">
+            <label for="timeMode">Time Range Mode</label>
+            <select id="timeMode" onchange="toggleTimeMode()">
+                <option value="hours" selected>Last N Hours</option>
+                <option value="date">Date Range</option>
+            </select>
+        </div>
+        <div class="control-group" id="hoursGroup">
+            <label for="hours">Hours to Display</label>
+            <select id="hours">
+                <option value="1">Last 1 Hour</option>
+                <option value="4">Last 4 Hours</option>
+                <option value="8" selected>Last 8 Hours</option>
+                <option value="24">Last 24 Hours</option>
+                <option value="48">Last 48 Hours</option>
+                <option value="72">Last 72 Hours</option>
+            </select>
+        </div>
+        <div class="control-group" id="dateGroup" style="display: none;">
+            <label for="startDate">Start Date</label>
+            <input type="date" id="startDate">
+        </div>
+        <div class="control-group" id="endDateGroup" style="display: none;">
+            <label for="endDate">End Date</label>
+            <input type="date" id="endDate">
+        </div>
+        <div class="control-group" id="datePresets" style="display: none; flex-direction: row; gap: 5px; flex-wrap: wrap;">
+            <button type="button" onclick="setDatePreset('today')" style="padding: 6px 12px; font-size: 0.85rem;">Today</button>
+            <button type="button" onclick="setDatePreset('yesterday')" style="padding: 6px 12px; font-size: 0.85rem;">Yesterday</button>
+            <button type="button" onclick="setDatePreset('last7')" style="padding: 6px 12px; font-size: 0.85rem;">Last 7 Days</button>
+            <button type="button" onclick="setDatePreset('last30')" style="padding: 6px 12px; font-size: 0.85rem;">Last 30 Days</button>
+        </div>
+        <div class="control-group">
+            <label for="allExchanges">
+                <input type="checkbox" id="allExchanges" checked>
+                Show All Exchanges
+            </label>
+        </div>
+        <div class="control-group" id="exchangeSelectGroup" style="display: none;">
+            <label for="exchange">Exchange</label>
+            <select id="exchange">
+                <option value="NSE" selected>NSE</option>
+                <option value="BSE">BSE</option>
+                <option value="NSE_MONTHLY">NSE Monthly</option>
+                <option value="BANKNIFTY_MONTHLY">BankNifty Monthly</option>
+            </select>
+        </div>
+        <div class="control-group" style="align-self: flex-end;">
+            <button id="refreshBtn" onclick="loadData()">🔄 Refresh Data</button>
+        </div>
+    </div>
+
+    <div id="status" class="status" style="display: none;"></div>
+
+    <div id="exchangeTabs" class="exchange-tabs"></div>
+
+    <div id="summaryCards" class="summary-cards"></div>
+
+    <div class="chart-container">
+        <div class="chart-title">📊 nse_next_oi_change_diff_put_call (Put - Call OI Change Difference)</div>
+        <div id="diffChart" style="height: 500px;"></div>
+    </div>
+
+    <div class="chart-container">
+        <div class="chart-title">OI Change: Call Total vs Put Total</div>
+        <div id="callPutChart" style="height: 500px;"></div>
+    </div>
+
+    <script>
+        let currentData = {};
+        let activeExchange = null;
+
+        function showStatus(message, type) {
+            const statusEl = document.getElementById('status');
+            statusEl.textContent = message;
+            statusEl.className = `status ${type}`;
+            statusEl.style.display = 'block';
+            if (type === 'success') {
+                setTimeout(() => statusEl.style.display = 'none', 3000);
+            }
+        }
+
+        function updateExchangeTabs() {
+            const tabsContainer = document.getElementById('exchangeTabs');
+            const exchanges = Object.keys(currentData).filter(ex => currentData[ex].length > 0);
+            
+            if (exchanges.length === 0) {
+                tabsContainer.innerHTML = '';
+                return;
+            }
+
+            if (!activeExchange || !exchanges.includes(activeExchange)) {
+                activeExchange = exchanges[0];
+            }
+
+            tabsContainer.innerHTML = exchanges.map(ex => 
+                `<div class="exchange-tab ${ex === activeExchange ? 'active' : ''}" onclick="switchExchange('${ex}')">${ex}</div>`
+            ).join('');
+        }
+
+        function switchExchange(exchange) {
+            activeExchange = exchange;
+            updateExchangeTabs();
+            updateCharts();
+            updateSummaryCards();
+        }
+
+        function toggleTimeMode() {
+            const timeMode = document.getElementById('timeMode').value;
+            const hoursGroup = document.getElementById('hoursGroup');
+            const dateGroup = document.getElementById('dateGroup');
+            const endDateGroup = document.getElementById('endDateGroup');
+            const datePresets = document.getElementById('datePresets');
+            
+            if (timeMode === 'date') {
+                hoursGroup.style.display = 'none';
+                dateGroup.style.display = 'flex';
+                endDateGroup.style.display = 'flex';
+                datePresets.style.display = 'flex';
+                
+                // Set default dates (today and yesterday)
+                const today = new Date();
+                const yesterday = new Date(today);
+                yesterday.setDate(yesterday.getDate() - 1);
+                
+                document.getElementById('endDate').value = today.toISOString().split('T')[0];
+                document.getElementById('startDate').value = yesterday.toISOString().split('T')[0];
+            } else {
+                hoursGroup.style.display = 'flex';
+                dateGroup.style.display = 'none';
+                endDateGroup.style.display = 'none';
+                datePresets.style.display = 'none';
+            }
+        }
+
+        function setDatePreset(preset) {
+            const today = new Date();
+            const startDateInput = document.getElementById('startDate');
+            const endDateInput = document.getElementById('endDate');
+            
+            switch(preset) {
+                case 'today':
+                    startDateInput.value = today.toISOString().split('T')[0];
+                    endDateInput.value = today.toISOString().split('T')[0];
+                    break;
+                case 'yesterday':
+                    const yesterday = new Date(today);
+                    yesterday.setDate(yesterday.getDate() - 1);
+                    startDateInput.value = yesterday.toISOString().split('T')[0];
+                    endDateInput.value = yesterday.toISOString().split('T')[0];
+                    break;
+                case 'last7':
+                    const last7 = new Date(today);
+                    last7.setDate(last7.getDate() - 7);
+                    startDateInput.value = last7.toISOString().split('T')[0];
+                    endDateInput.value = today.toISOString().split('T')[0];
+                    break;
+                case 'last30':
+                    const last30 = new Date(today);
+                    last30.setDate(last30.getDate() - 30);
+                    startDateInput.value = last30.toISOString().split('T')[0];
+                    endDateInput.value = today.toISOString().split('T')[0];
+                    break;
+            }
+        }
+
+        async function loadData() {
+            const timeMode = document.getElementById('timeMode').value;
+            const allExchanges = document.getElementById('allExchanges').checked;
+            const exchange = document.getElementById('exchange').value;
+            
+            showStatus('Loading data...', 'loading');
+            document.getElementById('refreshBtn').disabled = true;
+
+            try {
+                let url = `/api/oi-change-data?all_exchanges=${allExchanges}`;
+                
+                if (timeMode === 'date') {
+                    const startDate = document.getElementById('startDate').value;
+                    const endDate = document.getElementById('endDate').value;
+                    
+                    if (!startDate || !endDate) {
+                        showStatus('Please select both start and end dates', 'error');
+                        document.getElementById('refreshBtn').disabled = false;
+                        return;
+                    }
+                    
+                    if (new Date(startDate) > new Date(endDate)) {
+                        showStatus('Start date must be before end date', 'error');
+                        document.getElementById('refreshBtn').disabled = false;
+                        return;
+                    }
+                    
+                    url += `&start_date=${startDate}&end_date=${endDate}`;
+                } else {
+                    const hours = parseInt(document.getElementById('hours').value);
+                    url += `&hours=${hours}`;
+                }
+                
+                if (!allExchanges) {
+                    url += `&exchange=${exchange}`;
+                }
+                
+                const response = await fetch(url);
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const result = await response.json();
+                
+                if (!result.success) {
+                    throw new Error(result.error || 'Failed to load data');
+                }
+
+                currentData = result.data || {};
+                
+                // Filter out empty exchanges
+                const exchangesWithData = Object.keys(currentData).filter(ex => currentData[ex].length > 0);
+                
+                if (exchangesWithData.length === 0) {
+                    showStatus(`No data available for the selected time range (${hours} hours).`, 'error');
+                    return;
+                }
+
+                // Set active exchange if not set or if current one has no data
+                if (!activeExchange || !exchangesWithData.includes(activeExchange)) {
+                    activeExchange = exchangesWithData[0];
+                }
+
+                updateExchangeTabs();
+                updateSummaryCards();
+                updateCharts();
+
+                const totalRecords = Object.values(currentData).reduce((sum, arr) => sum + arr.length, 0);
+                const timeRange = result.start_time && result.end_time ? 
+                    ` from ${new Date(result.start_time).toLocaleString()} to ${new Date(result.end_time).toLocaleString()}` : '';
+                showStatus(`Loaded ${totalRecords} records across ${exchangesWithData.length} exchange(s)${timeRange}`, 'success');
+            } catch (error) {
+                console.error('Error loading data:', error);
+                showStatus(`Error: ${error.message}`, 'error');
+            } finally {
+                document.getElementById('refreshBtn').disabled = false;
+            }
+        }
+
+        function updateSummaryCards() {
+            if (!activeExchange || !currentData[activeExchange] || currentData[activeExchange].length === 0) {
+                document.getElementById('summaryCards').innerHTML = '';
+                return;
+            }
+
+            const data = currentData[activeExchange];
+            const latest = data[data.length - 1]; // Latest record
+            
+            const avgDiff = data
+                .filter(d => d.diff_put_call !== null)
+                .reduce((sum, d) => sum + d.diff_put_call, 0) / data.filter(d => d.diff_put_call !== null).length || 0;
+            
+            const avgCall = data
+                .filter(d => d.call_total !== null)
+                .reduce((sum, d) => sum + d.call_total, 0) / data.filter(d => d.call_total !== null).length || 0;
+            
+            const avgPut = data
+                .filter(d => d.put_total !== null)
+                .reduce((sum, d) => sum + d.put_total, 0) / data.filter(d => d.put_total !== null).length || 0;
+
+            const cardsHtml = `
+                <div class="summary-card ${latest.diff_put_call > 0 ? 'bearish' : latest.diff_put_call < 0 ? 'bullish' : 'neutral'}">
+                    <div class="label">Latest OI Change Diff (Put - Call)</div>
+                    <div class="value">${latest.diff_put_call !== null ? latest.diff_put_call.toLocaleString() : 'N/A'}</div>
+                </div>
+                <div class="summary-card">
+                    <div class="label">Latest Call Total</div>
+                    <div class="value">${latest.call_total !== null ? latest.call_total.toLocaleString() : 'N/A'}</div>
+                </div>
+                <div class="summary-card">
+                    <div class="label">Latest Put Total</div>
+                    <div class="value">${latest.put_total !== null ? latest.put_total.toLocaleString() : 'N/A'}</div>
+                </div>
+                <div class="summary-card">
+                    <div class="label">Avg OI Change Diff</div>
+                    <div class="value">${avgDiff.toFixed(0)}</div>
+                </div>
+                <div class="summary-card">
+                    <div class="label">Avg Call Total</div>
+                    <div class="value">${avgCall.toFixed(0)}</div>
+                </div>
+                <div class="summary-card">
+                    <div class="label">Avg Put Total</div>
+                    <div class="value">${avgPut.toFixed(0)}</div>
+                </div>
+            `;
+            document.getElementById('summaryCards').innerHTML = cardsHtml;
+        }
+
+        function updateCharts() {
+            if (!activeExchange || !currentData[activeExchange] || currentData[activeExchange].length === 0) {
+                return;
+            }
+
+            const data = currentData[activeExchange];
+            const timestamps = data.map(d => d.timestamp);
+
+            // Chart 1: OI Change Difference
+            plotDiffChart(data, timestamps);
+
+            // Chart 2: Call vs Put Total
+            plotCallPutChart(data, timestamps);
+        }
+
+        function plotDiffChart(data, timestamps) {
+            const diffValues = data.map(d => d.diff_put_call);
+
+            // Calculate moving averages for trend visualization
+            const ma5 = calculateMA(diffValues, 5);
+            const ma20 = calculateMA(diffValues, 20);
+
+            const trace = {
+                x: timestamps,
+                y: diffValues,
+                name: 'nse_next_oi_change_diff_put_call',
+                type: 'scatter',
+                mode: 'lines+markers',
+                line: { 
+                    color: '#60a5fa', 
+                    width: 2 
+                },
+                marker: { 
+                    size: 5,
+                    color: diffValues.map(v => v > 0 ? '#f87171' : v < 0 ? '#4ade80' : '#94a3b8'),
+                    line: { width: 0.5, color: '#1e293b' }
+                },
+                fill: 'tozeroy',
+                fillcolor: diffValues.map(v => v > 0 ? 'rgba(248, 113, 113, 0.15)' : 'rgba(74, 222, 128, 0.15)'),
+                hovertemplate: '<b>%{fullData.name}</b><br>' +
+                               'Time: %{x}<br>' +
+                               'Value: %{y:,.0f}<br>' +
+                               '<extra></extra>'
+            };
+
+            // Add moving averages if we have enough data
+            const traces = [trace];
+            
+            if (ma5.length > 0) {
+                traces.push({
+                    x: timestamps,
+                    y: ma5,
+                    name: 'MA(5)',
+                    type: 'scatter',
+                    mode: 'lines',
+                    line: { color: '#fbbf24', width: 1.5, dash: 'dash' },
+                    hovertemplate: 'MA(5): %{y:,.0f}<extra></extra>'
+                });
+            }
+
+            if (ma20.length > 0) {
+                traces.push({
+                    x: timestamps,
+                    y: ma20,
+                    name: 'MA(20)',
+                    type: 'scatter',
+                    mode: 'lines',
+                    line: { color: '#a78bfa', width: 1.5, dash: 'dot' },
+                    hovertemplate: 'MA(20): %{y:,.0f}<extra></extra>'
+                });
+            }
+
+            const zeroLine = {
+                x: timestamps,
+                y: Array(timestamps.length).fill(0),
+                name: 'Zero Line',
+                type: 'scatter',
+                mode: 'lines',
+                line: { color: '#94a3b8', width: 2, dash: 'dot' },
+                showlegend: false,
+                hoverinfo: 'skip'
+            };
+            traces.push(zeroLine);
+
+            const layout = {
+                title: { 
+                    text: 'nse_next_oi_change_diff_put_call from ml_features table',
+                    font: { color: '#60a5fa', size: 14 },
+                    x: 0.5,
+                    xanchor: 'center'
+                },
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                font: { color: '#e2e8f0' },
+                xaxis: { 
+                    title: 'Time',
+                    gridcolor: '#475569',
+                    zeroline: false,
+                    showgrid: true
+                },
+                yaxis: {
+                    title: 'OI Change Difference (Put - Call)',
+                    gridcolor: '#475569',
+                    zeroline: true,
+                    zerolinecolor: '#94a3b8',
+                    zerolinewidth: 2,
+                    showgrid: true
+                },
+                legend: { 
+                    x: 0,
+                    y: 1,
+                    bgcolor: 'rgba(30, 41, 59, 0.9)',
+                    bordercolor: '#475569',
+                    borderwidth: 1
+                },
+                hovermode: 'x unified',
+                margin: { l: 70, r: 20, t: 50, b: 60 },
+                annotations: [
+                    {
+                        text: diffValues.length > 0 ? 
+                            `Latest: ${diffValues[diffValues.length - 1]?.toLocaleString() || 'N/A'}` : '',
+                        xref: 'paper',
+                        yref: 'paper',
+                        x: 1,
+                        y: 1.02,
+                        xanchor: 'right',
+                        yanchor: 'bottom',
+                        showarrow: false,
+                        font: { color: diffValues.length > 0 && diffValues[diffValues.length - 1] > 0 ? '#f87171' : '#4ade80', size: 12, weight: 'bold' }
+                    }
+                ]
+            };
+
+            Plotly.newPlot('diffChart', traces, layout, {responsive: true});
+        }
+
+        function calculateMA(values, period) {
+            if (values.length < period) return [];
+            const ma = [];
+            for (let i = 0; i < values.length; i++) {
+                if (i < period - 1) {
+                    ma.push(null);
+                } else {
+                    const slice = values.slice(i - period + 1, i + 1).filter(v => v !== null);
+                    if (slice.length > 0) {
+                        ma.push(slice.reduce((a, b) => a + b, 0) / slice.length);
+                    } else {
+                        ma.push(null);
+                    }
+                }
+            }
+            return ma;
+        }
+
+        function plotCallPutChart(data, timestamps) {
+            const callValues = data.map(d => d.call_total);
+            const putValues = data.map(d => d.put_total);
+
+            const trace1 = {
+                x: timestamps,
+                y: callValues,
+                name: 'Call Total',
+                type: 'scatter',
+                mode: 'lines+markers',
+                line: { color: '#f87171', width: 2 },
+                marker: { size: 4 },
+                fill: 'tozeroy',
+                fillcolor: 'rgba(248, 113, 113, 0.1)'
+            };
+
+            const trace2 = {
+                x: timestamps,
+                y: putValues,
+                name: 'Put Total',
+                type: 'scatter',
+                mode: 'lines+markers',
+                line: { color: '#4ade80', width: 2 },
+                marker: { size: 4 },
+                fill: 'tozeroy',
+                fillcolor: 'rgba(74, 222, 128, 0.1)'
+            };
+
+            const layout = {
+                title: { text: '', font: { color: '#e2e8f0' } },
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                font: { color: '#e2e8f0' },
+                xaxis: { 
+                    title: 'Time',
+                    gridcolor: '#475569',
+                    zeroline: false
+                },
+                yaxis: {
+                    title: 'OI Change',
+                    gridcolor: '#475569',
+                    zeroline: false
+                },
+                legend: { 
+                    x: 0,
+                    y: 1,
+                    bgcolor: 'rgba(30, 41, 59, 0.8)'
+                },
+                hovermode: 'x unified',
+                margin: { l: 60, r: 20, t: 20, b: 60 }
+            };
+
+            Plotly.newPlot('callPutChart', [trace1, trace2], layout, {responsive: true});
+        }
+
+        // Handle checkbox change
+        document.getElementById('allExchanges').addEventListener('change', function(e) {
+            document.getElementById('exchangeSelectGroup').style.display = e.target.checked ? 'none' : 'flex';
+        });
+
+        // Load data on page load
+        window.addEventListener('DOMContentLoaded', function() {
+            loadData();
+            // Auto-refresh every 60 seconds
+            setInterval(loadData, 60000);
+        });
+    </script>
+</body>
+</html>
+

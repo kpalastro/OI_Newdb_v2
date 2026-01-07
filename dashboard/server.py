@@ -8,11 +8,12 @@ import logging
 from typing import Dict, List, Optional
 from datetime import datetime
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
+from datetime import datetime, timedelta
 
 # If we need access to AppManager, we'll need a way to share state.
 # Since AppManager runs in a different thread/process context usually,
@@ -209,6 +210,13 @@ async def root():
             </div>
             
             <div class="card">
+                <h2>📊 Dashboards</h2>
+                <ul class="api-list">
+                    <li><a href="/oi-change-analysis"><code>OI Change Analysis</code></a> - Visualize OI change metrics across all exchanges</li>
+                </ul>
+            </div>
+            
+            <div class="card">
                 <h2>🔌 API Endpoints</h2>
                 <ul class="api-list">
                     <li><a href="/api/status"><code>GET /api/status</code></a> - System status and available exchanges</li>
@@ -246,6 +254,127 @@ async def get_exchange_state(exchange: str):
         "expiry": handler.expiry_date.isoformat() if handler.expiry_date else None,
         "positions": _APP_MANAGER.open_positions if hasattr(_APP_MANAGER, 'open_positions') else {}
     }
+
+@app.get("/api/oi-change-data")
+async def get_oi_change_data(
+    exchange: str = Query("NSE", description="Exchange name (e.g., NSE, BSE)"),
+    hours: int = Query(None, description="Number of hours of historical data to fetch"),
+    start_date: str = Query(None, description="Start date in ISO format (YYYY-MM-DD)"),
+    end_date: str = Query(None, description="End date in ISO format (YYYY-MM-DD)"),
+    all_exchanges: bool = Query(False, description="Fetch data for all exchanges")
+):
+    """
+    Fetch OI change data from ml_features table for visualization.
+    Returns time series data for nse_next_oi_change_diff_put_call, 
+    nse_next_oi_change_call_total, and nse_next_oi_change_put_total.
+    
+    Either provide hours OR start_date/end_date. If both are provided, date range takes precedence.
+    """
+    try:
+        # Import database module
+        import database_new as db
+        from config import get_config
+        
+        config = get_config()
+        ph = '%s' if config.db_type == 'postgres' else '?'
+        
+        # Calculate time range
+        if start_date and end_date:
+            # Use date range
+            try:
+                from time_utils import to_ist
+                # Parse dates and set to start/end of day in IST
+                start_time = datetime.strptime(start_date, "%Y-%m-%d").replace(hour=0, minute=0, second=0, microsecond=0)
+                end_time = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, microsecond=999999)
+                # Convert to IST if needed (database stores in IST)
+                start_time = to_ist(start_time)
+                end_time = to_ist(end_time)
+            except ValueError as e:
+                return {"success": False, "error": f"Invalid date format. Use YYYY-MM-DD: {e}"}
+        elif hours is not None:
+            # Use hours
+            end_time = datetime.now()
+            start_time = end_time - timedelta(hours=hours)
+        else:
+            # Default to last 24 hours
+            end_time = datetime.now()
+            start_time = end_time - timedelta(hours=24)
+        
+        # Get exchanges to query
+        if all_exchanges:
+            # Get all exchanges from config
+            exchanges = config.all_exchanges
+        else:
+            exchanges = [exchange]
+        
+        result = {}
+        
+        for ex in exchanges:
+            conn = None
+            try:
+                conn = db.get_db_connection()
+                cursor = conn.cursor()
+                
+                query = f"""
+                    SELECT 
+                        timestamp,
+                        nse_next_oi_change_diff_put_call,
+                        nse_next_oi_change_call_total,
+                        nse_next_oi_change_put_total
+                    FROM ml_features
+                    WHERE exchange = {ph}
+                      AND timestamp >= {ph}
+                      AND timestamp <= {ph}
+                      AND (nse_next_oi_change_diff_put_call IS NOT NULL
+                           OR nse_next_oi_change_call_total IS NOT NULL
+                           OR nse_next_oi_change_put_total IS NOT NULL)
+                    ORDER BY timestamp ASC
+                """
+                
+                cursor.execute(query, (ex, start_time, end_time))
+                rows = cursor.fetchall()
+                
+                # Convert to list of dicts
+                data = []
+                for row in rows:
+                    data.append({
+                        "timestamp": row[0].isoformat() if isinstance(row[0], datetime) else str(row[0]),
+                        "diff_put_call": float(row[1]) if row[1] is not None else None,
+                        "call_total": float(row[2]) if row[2] is not None else None,
+                        "put_total": float(row[3]) if row[3] is not None else None,
+                    })
+                
+                result[ex] = data
+                
+            except Exception as e:
+                LOGGER.error(f"Error fetching OI change data for {ex}: {e}", exc_info=True)
+                result[ex] = []
+            finally:
+                if conn:
+                    db.release_db_connection(conn)
+        
+        return {
+            "success": True,
+            "data": result,
+            "start_time": start_time.isoformat(),
+            "end_time": end_time.isoformat()
+        }
+        
+    except Exception as e:
+        LOGGER.error(f"Error in get_oi_change_data: {e}", exc_info=True)
+        return {"success": False, "error": str(e), "data": {}}
+
+@app.get("/oi-change-analysis", response_class=HTMLResponse)
+async def oi_change_analysis_page():
+    """Serve the OI Change Analysis visualization page."""
+    try:
+        with open("templates/oi_change_analysis.html", "r") as f:
+            return HTMLResponse(content=f.read())
+    except FileNotFoundError:
+        return HTMLResponse(
+            content="<h1>Error</h1><p>OI Change Analysis template not found.</p>",
+            status_code=404
+        )
 
 @app.websocket("/ws/live")
 async def websocket_endpoint(websocket: WebSocket):
