@@ -52,6 +52,7 @@ from flask_socketio import SocketIO, emit
 from kite_trade import *
 from kiteconnect import KiteTicker
 import database_new as db
+from database_new import _get_placeholder, get_db_connection, release_db_connection
 from dotenv import load_dotenv
 from strings import UI_STRINGS
 from monitoring import monitoring_bp
@@ -189,6 +190,116 @@ def make_json_serializable(obj):
     elif isinstance(obj, (list, tuple)):
         return [make_json_serializable(item) for item in obj]
     return obj
+
+
+def hydrate_handler_from_db(exchange: str, handler) -> bool:
+    """
+    Fallback: Populate handler.latest_oi_data from the latest DB snapshot if in-memory
+    state is empty (e.g., after restart before first inference). This prevents the UI
+    from showing N/A and gives a baseline until live data flows.
+    """
+    try:
+        with handler.lock:
+            has_calls = handler.latest_oi_data.get('call_options')
+            has_puts = handler.latest_oi_data.get('put_options')
+            if has_calls or has_puts:
+                return True
+
+        ph = _get_placeholder()
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # 1) Latest timestamp for this exchange
+        cursor.execute(f"SELECT MAX(timestamp) FROM option_chain_snapshots WHERE exchange = {ph}", (exchange,))
+        row = cursor.fetchone()
+        if not row or not row[0]:
+            release_db_connection(conn)
+            return False
+        latest_ts = row[0]
+
+        # 2) Fetch option chain rows for that timestamp
+        cursor.execute(f"""
+            SELECT strike, option_type, oi, ltp, token, underlying_price,
+                   pct_change_3m, pct_change_5m, pct_change_10m, pct_change_15m, pct_change_30m,
+                   iv, volume, best_bid, best_ask, bid_quantity, ask_quantity,
+                   spread, order_book_imbalance
+            FROM option_chain_snapshots
+            WHERE exchange = {ph} AND timestamp = {ph}
+            ORDER BY strike, option_type
+        """, (exchange, latest_ts))
+
+        calls, puts = [], []
+        for rec in cursor.fetchall():
+            (strike, opt_type, oi, ltp, token, under_px,
+             pct3, pct5, pct10, pct15, pct30,
+             iv, vol, bb, ba, bq, aq, spr, obi) = rec
+            opt = {
+                'strike': strike,
+                'oi': oi,
+                'ltp': ltp,
+                'token': token,
+                'pct_changes': {
+                    '3m': pct3, '5m': pct5, '10m': pct10, '15m': pct15, '30m': pct30
+                },
+                'iv': iv,
+                'volume': vol,
+                'best_bid': bb,
+                'best_ask': ba,
+                'bid_quantity': bq,
+                'ask_quantity': aq,
+                'spread': spr,
+                'order_book_imbalance': obi,
+            }
+            if opt_type.upper() == 'CE':
+                calls.append(opt)
+            else:
+                puts.append(opt)
+
+        # 3) Fetch latest ML features to populate header metrics
+        cursor.execute(f"""
+            SELECT underlying_price, vix, pcr_total_oi,
+                   sentiment_score_50, sentiment_score_100,
+                   nse_next_oi_call_total, nse_next_oi_put_total,
+                   nse_next_volume_call_total, nse_next_volume_put_total
+            FROM ml_features
+            WHERE exchange = {ph}
+              AND timestamp = (SELECT MAX(timestamp) FROM ml_features WHERE exchange = {ph})
+        """, (exchange, exchange))
+        ml_row = cursor.fetchone()
+        release_db_connection(conn)
+
+        header = {}
+        if ml_row:
+            (under_px, vix_val, pcr, sent50, sent100,
+             next_call_oi, next_put_oi, next_call_vol, next_put_vol) = ml_row
+            header.update({
+                'underlying_price': under_px,
+                'vix': vix_val,
+                'pcr': pcr,
+                'sentiment_score_50': sent50,
+                'sentiment_score_100': sent100,
+                'nse_next_oi_call_total': next_call_oi,
+                'nse_next_oi_put_total': next_put_oi,
+                'nse_next_volume_call_total': next_call_vol,
+                'nse_next_volume_put_total': next_put_vol,
+            })
+        header.setdefault('last_update', latest_ts.strftime('%H:%M:%S'))
+        header.setdefault('status', 'Bootstrapped')
+
+        # 4) Update handler state
+        with handler.lock:
+            handler.latest_oi_data.update(header)
+            handler.latest_oi_data['call_options'] = calls
+            handler.latest_oi_data['put_options'] = puts
+        logging.info(f"[{exchange}] Hydrated latest_oi_data from DB snapshot @ {latest_ts}")
+        return True
+    except Exception as e:
+        logging.warning(f"[{exchange}] DB hydration failed: {e}")
+        try:
+            release_db_connection(conn)
+        except Exception:
+            pass
+        return False
 
 def _get_env_float(var_name: str, default: float) -> float:
     """Safely parse environment variable as float."""
@@ -4354,6 +4465,9 @@ def get_exchange_data(exchange):
     
     handler = exchange_handlers[exchange]
     try:
+        # If runtime state is empty (e.g., after restart), hydrate from DB so UI isn't blank
+        if not handler.latest_oi_data.get('call_options') and not handler.latest_oi_data.get('put_options'):
+            hydrate_handler_from_db(exchange, handler)
         with handler.lock:
             return jsonify(handler.latest_oi_data)
     except Exception as e:
@@ -4559,6 +4673,9 @@ def handle_connect():
     try:
         for exchange in DISPLAY_EXCHANGES:
             handler = exchange_handlers[exchange]
+            # If cache is empty (e.g., post-restart), hydrate from DB so UI is not blank
+            if not handler.latest_oi_data.get('call_options') and not handler.latest_oi_data.get('put_options'):
+                hydrate_handler_from_db(exchange, handler)
             with handler.lock:
                 # CRITICAL: Always refresh underlying_price and vix from latest tick data before sending
                 spot_ltp = normalize_price(
