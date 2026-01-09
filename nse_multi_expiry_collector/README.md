@@ -67,8 +67,8 @@ Backfill data for past dates:
 ```bash
 python nse_multi_expiry_collector/backfill_multi_expiry.py \
     --exchange NSE \
-    --start-date 2026-01-02 \
-    --end-date 2026-01-02
+    --start-date 2026-01-06 \
+    --end-date 2026-01-07
 ```
 
 **Options:**
