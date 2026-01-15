@@ -1648,13 +1648,8 @@ def feature_result_consumer():
                         else:
                             # Get monthly handler for exchanges that need monthly expiry
                             monthly_handler = None
-                            if result.exchange == 'NSE':
-                                # NSE uses NSE_MONTHLY handler for monthly expiry
-                                monthly_handler = exchange_handlers.get('NSE_MONTHLY')
-                                if monthly_handler is None:
-                                    logging.warning("[NSE] NSE_MONTHLY handler not available, skipping trade (monthly expiry required)")
-                                    continue
-                            elif result.exchange == 'BANKNIFTY_MONTHLY':
+                            # NSE now uses weekly expiry, no monthly handler needed
+                            if result.exchange == 'BANKNIFTY_MONTHLY':
                                 # BANKNIFTY_MONTHLY uses itself as the monthly handler
                                 monthly_handler = exchange_handlers.get('BANKNIFTY_MONTHLY')
                                 if monthly_handler is None:
@@ -1749,10 +1744,11 @@ def feature_result_consumer():
 
         try:
             if result.exchange in DISPLAY_EXCHANGES:
-                # For NSE, use monthly expiry handler to get correct prices for monthly contracts
+                # NSE now uses weekly expiry, no monthly handler needed
+                # Only monthly exchanges (BANKNIFTY_MONTHLY, NIFTY_MONTHLY) need monthly_handler
                 monthly_handler = None
-                if result.exchange == 'NSE':
-                    monthly_handler = exchange_handlers.get('NSE_MONTHLY')
+                if result.exchange in ('BANKNIFTY_MONTHLY', 'NIFTY_MONTHLY'):
+                    monthly_handler = exchange_handlers.get(result.exchange) or exchange_handlers.get('NSE_MONTHLY')
                 monitor_positions(handler, result.calls, result.puts, monthly_handler=monthly_handler)
                 with handler.lock:
                     # CRITICAL: Always refresh underlying_price and vix from latest tick data before sending
@@ -3648,7 +3644,10 @@ def _select_auto_trade_contract(
     Select a single option contract for auto trading based on exchange-specific strategy.
     
     Strategy:
-    - NSE, BANKNIFTY_MONTHLY, NIFTY_MONTHLY: Select ATM option from Monthly expiry
+    - NSE: Select ATM option from Weekly expiry
+      - BUY signal → Buy ATM CALL from weekly expiry
+      - SELL signal → Buy ATM PUT from weekly expiry
+    - BANKNIFTY_MONTHLY, NIFTY_MONTHLY: Select ATM option from Monthly expiry
       - BUY signal → Buy ATM CALL from monthly expiry
       - SELL signal → Buy ATM PUT from monthly expiry
     - BSE (SENSEX): Select Deep ITM option (2 strikes from ATM) from weekly expiry
@@ -3663,7 +3662,7 @@ def _select_auto_trade_contract(
         puts: List of put options from weekly expiry
         ml_signal: 'BUY' or 'SELL'
         exchange: Exchange name ('NSE', 'BSE', 'BANKNIFTY_MONTHLY', 'NIFTY_MONTHLY')
-        monthly_handler: Optional ExchangeDataHandler for monthly expiry (required for monthly exchanges)
+        monthly_handler: Optional ExchangeDataHandler for monthly expiry (required only for BANKNIFTY_MONTHLY, NIFTY_MONTHLY)
     
     Returns:
         Tuple of (symbol, option_type, price) or None if selection fails
@@ -3671,9 +3670,60 @@ def _select_auto_trade_contract(
     if ml_signal not in ('BUY', 'SELL'):
         return None
     
-    # Monthly Expiry Strategy: NSE, BANKNIFTY_MONTHLY, NIFTY_MONTHLY
-    # All use ATM options from monthly expiry
-    if exchange in ('NSE', 'BANKNIFTY_MONTHLY', 'NIFTY_MONTHLY'):
+    # NSE Strategy: Use ATM Options from Weekly Expiry
+    if exchange == 'NSE':
+        side_calls = ml_signal == 'BUY'
+        candidates = calls if side_calls else puts
+        option_type = 'CE' if side_calls else 'PE'
+        
+        if not candidates:
+            logging.warning(f"[{exchange}] No {option_type} options available in weekly expiry")
+            return None
+        
+        # Find ATM option (position closest to 0)
+        best_opt: Optional[Dict[str, Any]] = None
+        best_dist: float = float('inf')
+        
+        for opt in candidates:
+            price = opt.get('ltp')
+            if price is None:
+                continue
+            
+            pos = opt.get('position')
+            try:
+                dist = abs(float(pos)) if pos is not None else float('inf')
+            except (TypeError, ValueError):
+                continue
+            
+            if dist < best_dist:
+                best_opt = opt
+                best_dist = dist
+        
+        if not best_opt:
+            logging.warning(f"[{exchange}] Could not find ATM {option_type} in weekly expiry")
+            return None
+        
+        symbol = best_opt.get('symbol')
+        ltp = best_opt.get('ltp')
+        if symbol is None or ltp is None:
+            return None
+        
+        try:
+            current_price = float(ltp)
+        except (TypeError, ValueError):
+            return None
+        
+        position = best_opt.get('position', 0)
+        logging.info(
+            f"[{exchange}] Selected weekly expiry {option_type}: {symbol} @ {current_price:.2f} "
+            f"(position: {position}, Weekly expiry)"
+        )
+        
+        return symbol, option_type, current_price
+    
+    # Monthly Expiry Strategy: BANKNIFTY_MONTHLY, NIFTY_MONTHLY
+    # Use ATM options from monthly expiry
+    elif exchange in ('BANKNIFTY_MONTHLY', 'NIFTY_MONTHLY'):
         if monthly_handler is None:
             logging.warning(f"[{exchange}] Monthly handler not provided, cannot select monthly expiry contract")
             return None
@@ -3760,7 +3810,7 @@ def monitor_positions(handler: ExchangeDataHandler, call_options: list, put_opti
         handler: Exchange handler for the exchange being monitored
         call_options: Weekly expiry call options list
         put_options: Weekly expiry put options list
-        monthly_handler: Optional monthly expiry handler (required for NSE positions)
+        monthly_handler: Optional monthly expiry handler (only needed for BANKNIFTY_MONTHLY, NIFTY_MONTHLY)
     """
     if not handler.open_positions:
         return
@@ -3777,23 +3827,10 @@ def monitor_positions(handler: ExchangeDataHandler, call_options: list, put_opti
         if current_time.weekday() < 5 and current_time >= eod_exit_time:
             eod_exit_triggered = True
     
-        # CRITICAL FIX: For NSE, use monthly expiry option chain to get prices
-        # NSE positions are taken on monthly expiry contracts
-        if handler.exchange == 'NSE' and monthly_handler:
-            monthly_calls, monthly_puts = _get_monthly_option_chain(monthly_handler)
-            if monthly_calls and monthly_puts:
-                # Use monthly expiry prices for NSE positions
-                price_map = {opt['symbol']: opt.get('ltp') for opt in monthly_calls + monthly_puts 
-                            if opt.get('ltp') is not None}
-            else:
-                # Fallback to weekly if monthly data unavailable
-                logging.warning(f"[{handler.exchange}] Monthly option chain unavailable, using weekly expiry prices")
-                price_map = {opt['symbol']: opt.get('ltp') for opt in call_options + put_options 
-                            if opt.get('ltp') is not None}
-        else:
-            # For other exchanges (BSE), use weekly expiry prices
-            price_map = {opt['symbol']: opt.get('ltp') for opt in call_options + put_options 
-                        if opt.get('ltp') is not None}
+        # For all exchanges, use weekly expiry prices
+        # NSE now uses weekly expiry contracts (changed from monthly)
+        price_map = {opt['symbol']: opt.get('ltp') for opt in call_options + put_options 
+                    if opt.get('ltp') is not None}
         
         positions_to_close = []
         cumulative_mtm = 0.0
@@ -3894,31 +3931,13 @@ def _exit_conflicting_positions_on_signal_flip(
     try:
         current_time = now_ist()
 
-        # Build a price map similar to monitor_positions so exits use a realistic price
-        if handler.exchange == 'NSE' and monthly_handler:
-            monthly_calls, monthly_puts = _get_monthly_option_chain(monthly_handler)
-            if monthly_calls and monthly_puts:
-                price_map = {
-                    opt['symbol']: opt.get('ltp')
-                    for opt in monthly_calls + monthly_puts
-                    if opt.get('ltp') is not None
-                }
-            else:
-                logging.warning(
-                    f"[{handler.exchange}] Monthly option chain unavailable while rotating positions on signal flip; "
-                    "falling back to weekly prices"
-                )
-                price_map = {
-                    opt['symbol']: opt.get('ltp')
-                    for opt in call_options + put_options
-                    if opt.get('ltp') is not None
-                }
-        else:
-            price_map = {
-                opt['symbol']: opt.get('ltp')
-                for opt in call_options + put_options
-                if opt.get('ltp') is not None
-            }
+        # Build a price map using weekly expiry prices
+        # NSE now uses weekly expiry contracts (changed from monthly)
+        price_map = {
+            opt['symbol']: opt.get('ltp')
+            for opt in call_options + put_options
+            if opt.get('ltp') is not None
+        }
 
         positions_to_close: List[Tuple[str, str, float, float]] = []
 
@@ -4238,11 +4257,12 @@ def run_data_update_loop_exchange(exchange: str):
             
             # CRITICAL FIX: Update positions (current_price and MTM) before emitting
             # This ensures positions are updated every 5 seconds regardless of feature worker speed
-            # For NSE, use monthly expiry handler to get correct prices for monthly contracts
+            # NSE now uses weekly expiry, no monthly handler needed
+            # Only monthly exchanges (BANKNIFTY_MONTHLY, NIFTY_MONTHLY) need monthly_handler
             if handler.exchange in DISPLAY_EXCHANGES:
                 monthly_handler = None
-                if handler.exchange == 'NSE':
-                    monthly_handler = exchange_handlers.get('NSE_MONTHLY')
+                if handler.exchange in ('BANKNIFTY_MONTHLY', 'NIFTY_MONTHLY'):
+                    monthly_handler = exchange_handlers.get(handler.exchange) or exchange_handlers.get('NSE_MONTHLY')
                 monitor_positions(handler, calls, puts, monthly_handler=monthly_handler)
             
             # CRITICAL FIX: Emit option chain data directly as fallback to ensure 5-second refresh
