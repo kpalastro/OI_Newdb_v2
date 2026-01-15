@@ -297,6 +297,12 @@ def initialize_database():
                     trin_100 DOUBLE PRECISION,
                     sentiment_score DOUBLE PRECISION,
                     sentiment_confidence DOUBLE PRECISION,
+                    bse_sentiment_score_100 DOUBLE PRECISION,
+                    bse_sentiment_confidence_100 DOUBLE PRECISION,
+                    bse_trin_100 DOUBLE PRECISION,
+                    bse_sentiment_score_200 DOUBLE PRECISION,
+                    bse_sentiment_confidence_200 DOUBLE PRECISION,
+                    bse_trin_200 DOUBLE PRECISION,
                     created_at TIMESTAMP DEFAULT NOW()
                 )
                 ''',
@@ -530,6 +536,20 @@ def migrate_database():
                     cursor.execute(f'ALTER TABLE macro_signals ADD COLUMN {col_name} {col_type}')
                     logging.info(f"Added column {col_name} to macro_signals")
             
+            # Add BSE sentiment columns
+            bse_sentiment_cols = [
+                ('bse_sentiment_score_100', 'DOUBLE PRECISION'),
+                ('bse_sentiment_confidence_100', 'DOUBLE PRECISION'),
+                ('bse_trin_100', 'DOUBLE PRECISION'),
+                ('bse_sentiment_score_200', 'DOUBLE PRECISION'),
+                ('bse_sentiment_confidence_200', 'DOUBLE PRECISION'),
+                ('bse_trin_200', 'DOUBLE PRECISION'),
+            ]
+            for col_name, col_type in bse_sentiment_cols:
+                if col_name not in macro_cols:
+                    cursor.execute(f'ALTER TABLE macro_signals ADD COLUMN {col_name} {col_type}')
+                    logging.info(f"Added column {col_name} to macro_signals")
+            
             # Add aggregated sentiment_score and sentiment_confidence columns (computed from _50 and _100)
             # These are convenience columns that aggregate the NIFTY50 and NIFTY100 sentiment
             aggregated_sentiment_cols = [
@@ -565,6 +585,8 @@ def migrate_database():
                 ('sentiment_score_100', 'DOUBLE PRECISION'),
                 ('trin_50', 'DOUBLE PRECISION'),
                 ('trin_100', 'DOUBLE PRECISION'),
+                ('bse_sentiment_score_100', 'DOUBLE PRECISION'),
+                ('bse_sentiment_score_200', 'DOUBLE PRECISION'),
                 # NSE Option Chain Features
                 ('oi_next_sentiment', 'DOUBLE PRECISION'),
                 ('nse_next_oi_call_total', 'DOUBLE PRECISION'),
@@ -1254,7 +1276,10 @@ def save_macro_signals(exchange: str, fii_flow: float | None = None, dii_flow: f
                        timestamp: datetime | None = None,
                        sentiment_score_50: float | None = None, sentiment_confidence_50: float | None = None,
                        trin_50: float | None = None, sentiment_score_100: float | None = None,
-                       sentiment_confidence_100: float | None = None, trin_100: float | None = None) -> None:
+                       sentiment_confidence_100: float | None = None, trin_100: float | None = None,
+                       bse_sentiment_score_100: float | None = None, bse_sentiment_confidence_100: float | None = None,
+                       bse_trin_100: float | None = None, bse_sentiment_score_200: float | None = None,
+                       bse_sentiment_confidence_200: float | None = None, bse_trin_200: float | None = None) -> None:
     """
     Insert macro or fund-flow snapshot with NIFTY sentiment data.
     
@@ -1277,6 +1302,12 @@ def save_macro_signals(exchange: str, fii_flow: float | None = None, dii_flow: f
         sentiment_score_100: NIFTY100 sentiment score (0-100)
         sentiment_confidence_100: NIFTY100 confidence (0-100)
         trin_100: NIFTY100 TRIN value
+        bse_sentiment_score_100: BSE 100 sentiment score (0-100)
+        bse_sentiment_confidence_100: BSE 100 confidence (0-100)
+        bse_trin_100: BSE 100 TRIN value
+        bse_sentiment_score_200: BSE 200 sentiment score (0-100)
+        bse_sentiment_confidence_200: BSE 200 confidence (0-100)
+        bse_trin_200: BSE 200 TRIN value
     
     Note:
         sentiment_score and sentiment_confidence are computed as:
@@ -1321,8 +1352,10 @@ def save_macro_signals(exchange: str, fii_flow: float | None = None, dii_flow: f
                     sentiment_score_50, sentiment_confidence_50, trin_50,
                     sentiment_score_100, sentiment_confidence_100, trin_100,
                     sentiment_score, sentiment_confidence,
+                    bse_sentiment_score_100, bse_sentiment_confidence_100, bse_trin_100,
+                    bse_sentiment_score_200, bse_sentiment_confidence_200, bse_trin_200,
                     created_at
-                ) VALUES ({', '.join([ph]*22)})
+                ) VALUES ({', '.join([ph]*28)})
             ''', (
                 _coerce_iso_timestamp(timestamp),
                 exchange,
@@ -1345,6 +1378,12 @@ def save_macro_signals(exchange: str, fii_flow: float | None = None, dii_flow: f
                 trin_100,
                 sentiment_score,
                 sentiment_confidence,
+                bse_sentiment_score_100,
+                bse_sentiment_confidence_100,
+                bse_trin_100,
+                bse_sentiment_score_200,
+                bse_sentiment_confidence_200,
+                bse_trin_200,
                 _coerce_iso_timestamp(now_ist())
             ))
             conn.commit()

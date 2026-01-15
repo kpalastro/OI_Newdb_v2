@@ -145,6 +145,9 @@ def _refresh_macro_feature_cache(handler: "ExchangeDataHandler") -> None:
                 'sentiment_score_100': safe_float(macro_snapshot.get('sentiment_score_100'), 50.0),
                 'trin_50': safe_float(macro_snapshot.get('trin_50'), 1.0),
                 'trin_100': safe_float(macro_snapshot.get('trin_100'), 1.0),
+                # BSE sentiment features
+                'bse_sentiment_score_100': safe_float(macro_snapshot.get('bse_sentiment_score_100'), 50.0),
+                'bse_sentiment_score_200': safe_float(macro_snapshot.get('bse_sentiment_score_200'), 50.0),
             })
     except Exception as e:
         logging.debug(f"[{handler.exchange}] Macro signals fetch failed (optional): {e}")
@@ -4923,7 +4926,7 @@ def load_open_positions():
     except Exception as e:
         logging.error(f"Error loading open positions: {e}")
 
-from data_ingestion.macro_loader import find_macro_tokens, fetch_fii_dii_data, fetch_nifty_sentiment
+from data_ingestion.macro_loader import find_macro_tokens, fetch_fii_dii_data, fetch_nifty_sentiment, fetch_bse_sentiment
 from database_new import save_macro_signals, get_latest_macro_signals, get_historical_macro_signals, get_latest_macro_price_row
 
 def _calculate_banknifty_correlation():
@@ -5423,6 +5426,93 @@ def _save_macro_data_periodically():
         )
         
         logging.info(f"[MACRO_SAVE] ===== MACRO DATA SAVED TO DATABASE =====")
+        
+        # ----------------------------------------------------------------
+        # 2. FETCH AND SAVE BSE SENTIMENT DATA (BSE 100 and BSE 200)
+        # ----------------------------------------------------------------
+        # Fetch BSE sentiment data (runs every save cycle, but API may cache)
+        bse_sentiment = None
+        try:
+            # Check if we should fetch new BSE sentiment (every 5 mins to avoid rate limiting)
+            last_bse_sent_time = getattr(app_manager, 'last_bse_sentiment_fetch_time', None)
+            should_fetch = (last_bse_sent_time is None or 
+                          (now_ist() - last_bse_sent_time).total_seconds() > 300)  # 5 mins
+            
+            if should_fetch:
+                logging.info("[BSE_SENTIMENT] Attempting to fetch BSE sentiment data...")
+                bse_sentiment = fetch_bse_sentiment()
+                if bse_sentiment:
+                    # Check if we got valid data (not all None)
+                    has_valid_data = any(v is not None for v in bse_sentiment.values())
+                    if has_valid_data:
+                        app_manager.last_bse_sentiment_data = bse_sentiment
+                        app_manager.last_bse_sentiment_fetch_time = now_ist()
+                        logging.info(
+                            f"[BSE_SENTIMENT] ✓ Fetched: BSE100 Score={bse_sentiment.get('bse_sentiment_score_100')}, "
+                            f"Conf={bse_sentiment.get('bse_sentiment_confidence_100')}, TRIN={bse_sentiment.get('bse_trin_100')}, "
+                            f"BSE200 Score={bse_sentiment.get('bse_sentiment_score_200')}, "
+                            f"Conf={bse_sentiment.get('bse_sentiment_confidence_200')}, TRIN={bse_sentiment.get('bse_trin_200')}"
+                        )
+                    else:
+                        logging.warning("[BSE_SENTIMENT] Fetch returned all None values - using cached/previous data")
+                        bse_sentiment = getattr(app_manager, 'last_bse_sentiment_data', None)
+                else:
+                    logging.warning("[BSE_SENTIMENT] Fetch returned None - using cached data")
+                    # Use cached data if fetch fails
+                    bse_sentiment = getattr(app_manager, 'last_bse_sentiment_data', None)
+            else:
+                # Use cached data
+                bse_sentiment = getattr(app_manager, 'last_bse_sentiment_data', None)
+                logging.debug(f"[BSE_SENTIMENT] Using cached data (last fetch: {last_bse_sent_time})")
+        except Exception as e:
+            logging.error(f"[BSE_SENTIMENT] Fetch error: {e}", exc_info=True)
+            # Fallback to cached or previous DB values
+            bse_sentiment = getattr(app_manager, 'last_bse_sentiment_data', None)
+        
+        # Get previous BSE macro signals to use as fallback
+        previous_bse = get_latest_macro_signals('BSE')
+        
+        # Fallback to previous DB values if no sentiment data available
+        if not bse_sentiment and previous_bse:
+            bse_sentiment = {
+                'bse_sentiment_score_100': previous_bse.get('bse_sentiment_score_100'),
+                'bse_sentiment_confidence_100': previous_bse.get('bse_sentiment_confidence_100'),
+                'bse_trin_100': previous_bse.get('bse_trin_100'),
+                'bse_sentiment_score_200': previous_bse.get('bse_sentiment_score_200'),
+                'bse_sentiment_confidence_200': previous_bse.get('bse_sentiment_confidence_200'),
+                'bse_trin_200': previous_bse.get('bse_trin_200'),
+            }
+            if any(v is not None for v in bse_sentiment.values()):
+                logging.info("[BSE_SENTIMENT] Using previous DB values as fallback")
+        
+        # Extract BSE sentiment values (use None if not available)
+        bse_sentiment_score_100 = bse_sentiment.get('bse_sentiment_score_100') if bse_sentiment else None
+        bse_sentiment_confidence_100 = bse_sentiment.get('bse_sentiment_confidence_100') if bse_sentiment else None
+        bse_trin_100 = bse_sentiment.get('bse_trin_100') if bse_sentiment else None
+        bse_sentiment_score_200 = bse_sentiment.get('bse_sentiment_score_200') if bse_sentiment else None
+        bse_sentiment_confidence_200 = bse_sentiment.get('bse_sentiment_confidence_200') if bse_sentiment else None
+        bse_trin_200 = bse_sentiment.get('bse_trin_200') if bse_sentiment else None
+        
+        # Save BSE sentiment data if we have any valid data
+        if any(v is not None for v in [bse_sentiment_score_100, bse_sentiment_score_200]):
+            logging.info(
+                f"[BSE_SENTIMENT] Saving BSE sentiment data: "
+                f"BSE100 Score={bse_sentiment_score_100}, Conf={bse_sentiment_confidence_100}, TRIN={bse_trin_100}, "
+                f"BSE200 Score={bse_sentiment_score_200}, Conf={bse_sentiment_confidence_200}, TRIN={bse_trin_200}"
+            )
+            save_macro_signals(
+                exchange='BSE',
+                bse_sentiment_score_100=bse_sentiment_score_100,
+                bse_sentiment_confidence_100=bse_sentiment_confidence_100,
+                bse_trin_100=bse_trin_100,
+                bse_sentiment_score_200=bse_sentiment_score_200,
+                bse_sentiment_confidence_200=bse_sentiment_confidence_200,
+                bse_trin_200=bse_trin_200,
+                metadata={'source': 'bse_api', 'timestamp': now_ist().isoformat()}
+            )
+            logging.info(f"[BSE_SENTIMENT] ===== BSE SENTIMENT DATA SAVED TO DATABASE =====")
+        else:
+            logging.debug("[BSE_SENTIMENT] No valid BSE sentiment data to save")
         
         # Log occasionally
         if not hasattr(_save_macro_data_periodically, '_last_log_time'):

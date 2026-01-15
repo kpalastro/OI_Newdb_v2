@@ -296,3 +296,105 @@ def fetch_nifty_sentiment() -> Dict[str, float]:
             'sentiment_confidence_100': None,
             'trin_100': None,
         }
+
+
+def fetch_bse_sentiment() -> Dict[str, float]:
+    """
+    Fetch BSE 100 and BSE 200 sentiment data using bsesentiment.py logic.
+    
+    Returns:
+        Dictionary with:
+        - bse_sentiment_score_100: BSE 100 sentiment score (0-100)
+        - bse_sentiment_confidence_100: BSE 100 confidence (0-100)
+        - bse_trin_100: BSE 100 TRIN value
+        - bse_sentiment_score_200: BSE 200 sentiment score (0-100)
+        - bse_sentiment_confidence_200: BSE 200 confidence (0-100)
+        - bse_trin_200: BSE 200 TRIN value
+    """
+    try:
+        from bsesentiment import get_bse_sentiment
+        
+        # Fetch sentiment for both BSE indices
+        logging.info("[BSE_SENTIMENT] Calling get_bse_sentiment...")
+        bse_data = get_bse_sentiment()
+        
+        if not bse_data:
+            logging.warning("[BSE_SENTIMENT] Failed to fetch BSE sentiment data")
+            return {
+                'bse_sentiment_score_100': None,
+                'bse_sentiment_confidence_100': None,
+                'bse_trin_100': None,
+                'bse_sentiment_score_200': None,
+                'bse_sentiment_confidence_200': None,
+                'bse_trin_200': None,
+            }
+        
+        bse_100_data = bse_data.get('bse_100')
+        bse_200_data = bse_data.get('bse_200')
+        
+        # Extract numeric values from BSE 100 data
+        bse_100_score = None
+        bse_100_confidence = None
+        bse_100_trin = None
+        
+        if bse_100_data:
+            bse_100_score = bse_100_data.get('_sentiment_score')
+            bse_100_confidence = bse_100_data.get('_confidence')
+            bse_100_trin = bse_100_data.get('_trin')
+        
+        # Extract numeric values from BSE 200 data
+        bse_200_score = None
+        bse_200_confidence = None
+        bse_200_trin = None
+        
+        if bse_200_data:
+            bse_200_score = bse_200_data.get('_sentiment_score')
+            bse_200_confidence = bse_200_data.get('_confidence')
+            bse_200_trin = bse_200_data.get('_trin')
+        
+        result = {
+            'bse_sentiment_score_100': bse_100_score,
+            'bse_sentiment_confidence_100': bse_100_confidence,
+            'bse_trin_100': bse_100_trin,
+            'bse_sentiment_score_200': bse_200_score,
+            'bse_sentiment_confidence_200': bse_200_confidence,
+            'bse_trin_200': bse_200_trin,
+        }
+        
+        # Log extracted values (handle None values safely)
+        score100_str = f"{bse_100_score:.1f}" if bse_100_score is not None else "None"
+        conf100_str = f"{bse_100_confidence:.0f}%" if bse_100_confidence is not None else "None"
+        trin100_str = f"{bse_100_trin:.2f}" if bse_100_trin is not None else "None"
+        score200_str = f"{bse_200_score:.1f}" if bse_200_score is not None else "None"
+        conf200_str = f"{bse_200_confidence:.0f}%" if bse_200_confidence is not None else "None"
+        trin200_str = f"{bse_200_trin:.2f}" if bse_200_trin is not None else "None"
+        
+        logging.info(
+            f"✓ BSE Sentiment: BSE100 Score={score100_str} "
+            f"(Conf={conf100_str}, TRIN={trin100_str}), "
+            f"BSE200 Score={score200_str} "
+            f"(Conf={conf200_str}, TRIN={trin200_str})"
+        )
+        
+        return result
+        
+    except ImportError:
+        logging.warning("bsesentiment module not found. BSE sentiment data unavailable.")
+        return {
+            'bse_sentiment_score_100': None,
+            'bse_sentiment_confidence_100': None,
+            'bse_trin_100': None,
+            'bse_sentiment_score_200': None,
+            'bse_sentiment_confidence_200': None,
+            'bse_trin_200': None,
+        }
+    except Exception as e:
+        logging.error(f"Failed to fetch BSE sentiment: {e}", exc_info=True)
+        return {
+            'bse_sentiment_score_100': None,
+            'bse_sentiment_confidence_100': None,
+            'bse_trin_100': None,
+            'bse_sentiment_score_200': None,
+            'bse_sentiment_confidence_200': None,
+            'bse_trin_200': None,
+        }

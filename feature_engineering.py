@@ -27,6 +27,8 @@ _SENTIMENT_ANALYZER = None
 
 # NSE Option Chain Cache (module-level)
 _nse_option_chain_cache: Dict[float, Tuple[Dict, datetime]] = {}
+# BSE Option Chain Cache (module-level)
+_bse_option_chain_cache: Dict[float, Tuple[Dict, datetime]] = {}
 _cache_timeout_seconds = 30  # Cache for 30 seconds
 
 def get_sentiment_analyzer():
@@ -72,6 +74,7 @@ REQUIRED_FEATURE_COLUMNS = [
     'depth_buy_total', 'depth_sell_total', 'depth_imbalance_ratio',
     'macro_fii_dii_net', 'macro_usdinr_trend', 'macro_crude_trend',
     'macro_sentiment_score_50', 'macro_sentiment_score_100', 'macro_trin_50', 'macro_trin_100',
+    'macro_bse_sentiment_score_100', 'macro_bse_sentiment_score_200',
     'macro_banknifty_corr', 'macro_risk_on_score',
     'order_flow_toxicity', 'bid_ask_bounce_score',
     'block_trade_count', 'block_trade_imbalance', 'sweep_order_detected', 'smart_money_flow',
@@ -245,6 +248,216 @@ def _fetch_nse_option_chain_data(strike: float) -> Optional[Dict]:
     except Exception as e:
         logging.error(f"Error fetching NSE option chain data for strike {strike}: {e}")
         return None
+
+
+def _fetch_bse_option_chain_data(strike: float) -> Optional[Dict]:
+    """
+    Fetch BSE option chain data from BSE API for a given strike price.
+    
+    Args:
+        strike: Strike price to fetch data for (e.g., 83500.00)
+    
+    Returns:
+        Dictionary containing option chain data or None if fetch fails
+    """
+    try:
+        import requests
+        from time import sleep
+        
+        # Format strike with comma as thousand separator (BSE API format)
+        strike_formatted = f"{strike:,.2f}"
+        
+        url = f"https://api.bseindia.com/BseIndiaAPI/api/DerivOptionChain_IV/w?Expiry=&scrip_cd=1&strprice={strike_formatted}"
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.bseindia.com/",
+            "X-Requested-With": "XMLHttpRequest"
+        }
+        
+        # First, establish a session by visiting the main page
+        session = requests.Session()
+        session.get("https://www.bseindia.com/", headers=headers, timeout=10)
+        sleep(0.5)  # Small delay to avoid rate limiting
+        
+        # Now fetch the option chain data
+        response = session.get(url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            logging.warning(f"BSE API returned status {response.status_code} for strike {strike}")
+            return None
+    except Exception as e:
+        logging.error(f"Error fetching BSE option chain data for strike {strike}: {e}")
+        return None
+
+
+def _parse_bse_option_chain_data(option_chain_data: Dict) -> Dict[str, float]:
+    """
+    Parse BSE option chain JSON response and aggregate OI, Change in OI, and Volume.
+    
+    Args:
+        option_chain_data: Raw JSON response from BSE API
+    
+    Returns:
+        Dictionary with aggregated metrics:
+        - total_oi_call (from tot_C_Open_Interest or aggregated from Table)
+        - total_oi_put (from tot_Open_Interest or aggregated from Table)
+        - total_oi_change_call (0.0 - BSE API always returns 0 for change)
+        - total_oi_change_put (0.0 - BSE API always returns 0 for change)
+        - total_volume_call
+        - total_volume_put
+        - oi_change_diff_put_call (0.0 since OI change is always 0)
+    """
+    try:
+        # BSE API structure: 
+        # { 
+        #   "Table": [...], 
+        #   "tot_C_Vol_Traded": "...", 
+        #   "tot_Vol_Traded": "...",
+        #   "tot_C_Open_Interest": "...",
+        #   "tot_Open_Interest": "..."
+        # }
+        table_data = option_chain_data.get('Table', [])
+        
+        # Get aggregated totals from root level (preferred method)
+        tot_c_vol = option_chain_data.get('tot_C_Vol_Traded', '0')
+        tot_vol = option_chain_data.get('tot_Vol_Traded', '0')
+        tot_c_oi = option_chain_data.get('tot_C_Open_Interest', '0')
+        tot_oi = option_chain_data.get('tot_Open_Interest', '0')
+        
+        # Parse volume totals (remove commas and convert to float)
+        total_volume_call = 0.0
+        total_volume_put = 0.0
+        
+        try:
+            if tot_c_vol and tot_c_vol != '':
+                total_volume_call = float(str(tot_c_vol).replace(',', '').replace(' ', ''))
+        except (ValueError, AttributeError):
+            pass
+        
+        try:
+            if tot_vol and tot_vol != '':
+                total_volume_put = float(str(tot_vol).replace(',', '').replace(' ', ''))
+        except (ValueError, AttributeError):
+            pass
+        
+        # Parse OI totals from root level (preferred - already aggregated)
+        total_oi_call = 0.0
+        total_oi_put = 0.0
+        
+        try:
+            if tot_c_oi and tot_c_oi != '':
+                total_oi_call = float(str(tot_c_oi).replace(',', '').replace(' ', ''))
+        except (ValueError, AttributeError):
+            pass
+        
+        try:
+            if tot_oi and tot_oi != '':
+                total_oi_put = float(str(tot_oi).replace(',', '').replace(' ', ''))
+        except (ValueError, AttributeError):
+            pass
+        
+        # Aggregate from Table array if root totals are not reliable or missing
+        # BSE API returns data per expiry, so we aggregate across all expiries
+        aggregated_vol_call = 0.0
+        aggregated_vol_put = 0.0
+        aggregated_oi_call = 0.0
+        aggregated_oi_put = 0.0
+        
+        for item in table_data:
+            # CALL volume (C_ prefix)
+            c_vol = item.get('C_Vol_Traded', '')
+            if c_vol and c_vol != '':
+                try:
+                    aggregated_vol_call += float(str(c_vol).replace(',', '').replace(' ', ''))
+                except (ValueError, AttributeError):
+                    pass
+            
+            # PUT volume (no prefix)
+            vol = item.get('Vol_Traded', '')
+            if vol and vol != '':
+                try:
+                    aggregated_vol_put += float(str(vol).replace(',', '').replace(' ', ''))
+                except (ValueError, AttributeError):
+                    pass
+            
+            # CALL OI (C_Open_Interest)
+            c_oi = item.get('C_Open_Interest', '')
+            if c_oi and c_oi != '':
+                try:
+                    aggregated_oi_call += float(str(c_oi).replace(',', '').replace(' ', ''))
+                except (ValueError, AttributeError):
+                    pass
+            
+            # PUT OI (Open_Interest)
+            oi = item.get('Open_Interest', '')
+            if oi and oi != '':
+                try:
+                    aggregated_oi_put += float(str(oi).replace(',', '').replace(' ', ''))
+                except (ValueError, AttributeError):
+                    pass
+        
+        # Use aggregated values if root totals are 0 or missing
+        if total_volume_call == 0.0 and aggregated_vol_call > 0.0:
+            total_volume_call = aggregated_vol_call
+        if total_volume_put == 0.0 and aggregated_vol_put > 0.0:
+            total_volume_put = aggregated_vol_put
+        
+        if total_oi_call == 0.0 and aggregated_oi_call > 0.0:
+            total_oi_call = aggregated_oi_call
+        if total_oi_put == 0.0 and aggregated_oi_put > 0.0:
+            total_oi_put = aggregated_oi_put
+        
+        # BSE API provides OI but Change in OI is always "0" in the response
+        # C_Absolute_Change_OI and Absolute_Change_OI are always "0"
+        total_oi_change_call = 0.0
+        total_oi_change_put = 0.0
+        
+        # Calculate difference: PUT - CALL (for OI change, will be 0.0)
+        oi_change_diff_put_call = 0.0
+        
+        return {
+            'total_oi_call': total_oi_call,
+            'total_oi_put': total_oi_put,
+            'total_oi_change_call': total_oi_change_call,
+            'total_oi_change_put': total_oi_change_put,
+            'total_volume_call': total_volume_call,
+            'total_volume_put': total_volume_put,
+            'oi_change_diff_put_call': oi_change_diff_put_call
+        }
+    except Exception as e:
+        logging.error(f"Error parsing BSE option chain data: {e}", exc_info=True)
+        return {
+            'total_oi_call': 0.0,
+            'total_oi_put': 0.0,
+            'total_oi_change_call': 0.0,
+            'total_oi_change_put': 0.0,
+            'total_volume_call': 0.0,
+            'total_volume_put': 0.0,
+            'oi_change_diff_put_call': 0.0
+        }
+
+
+def _get_cached_bse_data(strike: float) -> Optional[Dict]:
+    """Get cached BSE option chain data if available and fresh."""
+    global _bse_option_chain_cache
+    
+    if strike in _bse_option_chain_cache:
+        data, cached_time = _bse_option_chain_cache[strike]
+        if datetime.now() - cached_time < timedelta(seconds=_cache_timeout_seconds):
+            return data
+    
+    return None
+
+
+def _cache_bse_data(strike: float, data: Dict):
+    """Cache BSE option chain data with timestamp."""
+    global _bse_option_chain_cache
+    _bse_option_chain_cache[strike] = (data, datetime.now())
 
 
 def _parse_nse_option_chain_data(option_chain_data: Dict) -> Dict[str, float]:
@@ -561,6 +774,9 @@ def engineer_live_feature_set(
     features['macro_sentiment_score_100'] = safe_get_macro('sentiment_score_100', 50.0)  # Default to neutral (50)
     features['macro_trin_50'] = safe_get_macro('trin_50', 1.0)  # Default to neutral (1.0)
     features['macro_trin_100'] = safe_get_macro('trin_100', 1.0)  # Default to neutral (1.0)
+    # BSE sentiment features
+    features['macro_bse_sentiment_score_100'] = safe_get_macro('bse_sentiment_score_100', 50.0)  # Default to neutral (50)
+    features['macro_bse_sentiment_score_200'] = safe_get_macro('bse_sentiment_score_200', 50.0)  # Default to neutral (50)
     features['vix_contango_pct'] = safe_get_macro('vix_contango_pct', 0.0)
     features['term_structure_spread'] = safe_get_macro('term_structure_spread', 0.0)
 
@@ -600,7 +816,7 @@ def engineer_live_feature_set(
     # 4. Net Flow Direction: +ve = bear pressure (CE adds / PE leaves), -ve = bull pressure
     features['itm_oi_flow_direction'] = itm_ce_change - itm_pe_change
 
-    # NSE Option Chain Features (based on ATM strike from open price)
+    # Option Chain Features (NSE or BSE) - based on ATM strike from open price
     try:
         # Get market open price
         open_price = _get_market_open_price(handler)
@@ -610,40 +826,79 @@ def engineer_live_feature_set(
             strike_difference = handler.config.get('strike_difference', 50)
             atm_strike = _calculate_nearest_atm_strike(open_price, strike_difference)
             
-            # Fetch NSE option chain data (with caching)
-            option_chain_data = _get_cached_nse_data(atm_strike)
-            if option_chain_data is None:
-                option_chain_data = _fetch_nse_option_chain_data(atm_strike)
-                if option_chain_data:
-                    _cache_nse_data(atm_strike, option_chain_data)
+            # Determine exchange from handler
+            exchange = getattr(handler, 'exchange', 'NSE')
             
-            if option_chain_data:
-                # Parse and aggregate the data
-                nse_metrics = _parse_nse_option_chain_data(option_chain_data)
+            if exchange == 'BSE':
+                # Fetch BSE option chain data (with caching)
+                option_chain_data = _get_cached_bse_data(atm_strike)
+                if option_chain_data is None:
+                    option_chain_data = _fetch_bse_option_chain_data(atm_strike)
+                    if option_chain_data:
+                        _cache_bse_data(atm_strike, option_chain_data)
                 
-                # Add to features with prefix 'nse_next_'
-                features['nse_next_oi_call_total'] = nse_metrics['total_oi_call']
-                features['nse_next_oi_put_total'] = nse_metrics['total_oi_put']
-                features['nse_next_oi_change_call_total'] = nse_metrics['total_oi_change_call']
-                features['nse_next_oi_change_put_total'] = nse_metrics['total_oi_change_put']
-                features['nse_next_volume_call_total'] = nse_metrics['total_volume_call']
-                features['nse_next_volume_put_total'] = nse_metrics['total_volume_put']
-                features['nse_next_oi_change_diff_put_call'] = nse_metrics['oi_change_diff_put_call']
-                
-                # Add sentiment feature (same value as the difference) - placed in Sentiment section
-                features['oi_next_sentiment'] = nse_metrics['oi_change_diff_put_call']
+                if option_chain_data:
+                    # Parse and aggregate the data
+                    bse_metrics = _parse_bse_option_chain_data(option_chain_data)
+                    
+                    # Add to features with prefix 'nse_next_' (reusing same fields for BSE)
+                    features['nse_next_oi_call_total'] = bse_metrics['total_oi_call']
+                    features['nse_next_oi_put_total'] = bse_metrics['total_oi_put']
+                    features['nse_next_oi_change_call_total'] = bse_metrics['total_oi_change_call']
+                    features['nse_next_oi_change_put_total'] = bse_metrics['total_oi_change_put']
+                    features['nse_next_volume_call_total'] = bse_metrics['total_volume_call']
+                    features['nse_next_volume_put_total'] = bse_metrics['total_volume_put']
+                    features['nse_next_oi_change_diff_put_call'] = bse_metrics['oi_change_diff_put_call']
+                    
+                    # Add sentiment feature (same value as the difference) - placed in Sentiment section
+                    features['oi_next_sentiment'] = bse_metrics['oi_change_diff_put_call']
+                else:
+                    # Set to zero if fetch failed
+                    features.update({
+                        'nse_next_oi_call_total': 0.0,
+                        'nse_next_oi_put_total': 0.0,
+                        'nse_next_oi_change_call_total': 0.0,
+                        'nse_next_oi_change_put_total': 0.0,
+                        'nse_next_volume_call_total': 0.0,
+                        'nse_next_volume_put_total': 0.0,
+                        'nse_next_oi_change_diff_put_call': 0.0,
+                        'oi_next_sentiment': 0.0
+                    })
             else:
-                # Set to zero if fetch failed
-                features.update({
-                    'nse_next_oi_call_total': 0.0,
-                    'nse_next_oi_put_total': 0.0,
-                    'nse_next_oi_change_call_total': 0.0,
-                    'nse_next_oi_change_put_total': 0.0,
-                    'nse_next_volume_call_total': 0.0,
-                    'nse_next_volume_put_total': 0.0,
-                    'nse_next_oi_change_diff_put_call': 0.0,
-                    'oi_next_sentiment': 0.0
-                })
+                # NSE: Fetch NSE option chain data (with caching)
+                option_chain_data = _get_cached_nse_data(atm_strike)
+                if option_chain_data is None:
+                    option_chain_data = _fetch_nse_option_chain_data(atm_strike)
+                    if option_chain_data:
+                        _cache_nse_data(atm_strike, option_chain_data)
+                
+                if option_chain_data:
+                    # Parse and aggregate the data
+                    nse_metrics = _parse_nse_option_chain_data(option_chain_data)
+                    
+                    # Add to features with prefix 'nse_next_'
+                    features['nse_next_oi_call_total'] = nse_metrics['total_oi_call']
+                    features['nse_next_oi_put_total'] = nse_metrics['total_oi_put']
+                    features['nse_next_oi_change_call_total'] = nse_metrics['total_oi_change_call']
+                    features['nse_next_oi_change_put_total'] = nse_metrics['total_oi_change_put']
+                    features['nse_next_volume_call_total'] = nse_metrics['total_volume_call']
+                    features['nse_next_volume_put_total'] = nse_metrics['total_volume_put']
+                    features['nse_next_oi_change_diff_put_call'] = nse_metrics['oi_change_diff_put_call']
+                    
+                    # Add sentiment feature (same value as the difference) - placed in Sentiment section
+                    features['oi_next_sentiment'] = nse_metrics['oi_change_diff_put_call']
+                else:
+                    # Set to zero if fetch failed
+                    features.update({
+                        'nse_next_oi_call_total': 0.0,
+                        'nse_next_oi_put_total': 0.0,
+                        'nse_next_oi_change_call_total': 0.0,
+                        'nse_next_oi_change_put_total': 0.0,
+                        'nse_next_volume_call_total': 0.0,
+                        'nse_next_volume_put_total': 0.0,
+                        'nse_next_oi_change_diff_put_call': 0.0,
+                        'oi_next_sentiment': 0.0
+                    })
         else:
             # Set to zero if open price not available
             features.update({
@@ -657,7 +912,7 @@ def engineer_live_feature_set(
                 'oi_next_sentiment': 0.0
             })
     except Exception as e:
-        logging.error(f"Error calculating NSE option chain features: {e}", exc_info=True)
+        logging.error(f"Error calculating option chain features: {e}", exc_info=True)
         # Set to zero on error
         features.update({
             'nse_next_oi_call_total': 0.0,

@@ -53,18 +53,35 @@ def update_sentiment_scores(exchange: str = None, exact_match: bool = True):
         
         if exact_match:
             # Match timestamps up to minutes (ignore seconds) - PostgreSQL only
-            query = f"""
-                UPDATE ml_features mf
-                SET 
-                    sentiment_score_50 = ms.sentiment_score_50,
-                    sentiment_score_100 = ms.sentiment_score_100
-                FROM macro_signals ms
-                WHERE mf.exchange = ms.exchange
-                  AND DATE_TRUNC('minute', mf.timestamp) = DATE_TRUNC('minute', ms.timestamp)
-                  AND ms.sentiment_score_50 IS NOT NULL
-                  AND ms.sentiment_score_100 IS NOT NULL
-                  {exchange_filter}
-            """
+            # Handle NSE and BSE differently
+            if exchange == 'BSE':
+                # For BSE, update BSE sentiment columns
+                query = f"""
+                    UPDATE ml_features mf
+                    SET 
+                        bse_sentiment_score_100 = ms.bse_sentiment_score_100,
+                        bse_sentiment_score_200 = ms.bse_sentiment_score_200
+                    FROM macro_signals ms
+                    WHERE mf.exchange = ms.exchange
+                      AND DATE_TRUNC('minute', mf.timestamp) = DATE_TRUNC('minute', ms.timestamp)
+                      AND ms.bse_sentiment_score_100 IS NOT NULL
+                      AND ms.bse_sentiment_score_200 IS NOT NULL
+                      {exchange_filter}
+                """
+            else:
+                # For NSE (or all exchanges), update NSE sentiment columns
+                query = f"""
+                    UPDATE ml_features mf
+                    SET 
+                        sentiment_score_50 = ms.sentiment_score_50,
+                        sentiment_score_100 = ms.sentiment_score_100
+                    FROM macro_signals ms
+                    WHERE mf.exchange = ms.exchange
+                      AND DATE_TRUNC('minute', mf.timestamp) = DATE_TRUNC('minute', ms.timestamp)
+                      AND ms.sentiment_score_50 IS NOT NULL
+                      AND ms.sentiment_score_100 IS NOT NULL
+                      {exchange_filter}
+                """
             cursor.execute(query, exchange_params)
                               AND ms.sentiment_score_100 IS NOT NULL
                         )
@@ -116,14 +133,24 @@ def update_sentiment_scores(exchange: str = None, exact_match: bool = True):
         
         # Verify the update
         if exchange:
-            verify_query = f"""
-                SELECT 
-                    COUNT(*) as total,
-                    COUNT(sentiment_score_50) as with_score_50,
-                    COUNT(sentiment_score_100) as with_score_100
-                FROM ml_features
-                WHERE exchange = {ph}
-            """
+            if exchange == 'BSE':
+                verify_query = f"""
+                    SELECT 
+                        COUNT(*) as total,
+                        COUNT(bse_sentiment_score_100) as with_bse_score_100,
+                        COUNT(bse_sentiment_score_200) as with_bse_score_200
+                    FROM ml_features
+                    WHERE exchange = {ph}
+                """
+            else:
+                verify_query = f"""
+                    SELECT 
+                        COUNT(*) as total,
+                        COUNT(sentiment_score_50) as with_score_50,
+                        COUNT(sentiment_score_100) as with_score_100
+                    FROM ml_features
+                    WHERE exchange = {ph}
+                """
             cursor.execute(verify_query, (exchange,))
         else:
             verify_query = """
@@ -131,7 +158,9 @@ def update_sentiment_scores(exchange: str = None, exact_match: bool = True):
                     exchange,
                     COUNT(*) as total,
                     COUNT(sentiment_score_50) as with_score_50,
-                    COUNT(sentiment_score_100) as with_score_100
+                    COUNT(sentiment_score_100) as with_score_100,
+                    COUNT(bse_sentiment_score_100) as with_bse_score_100,
+                    COUNT(bse_sentiment_score_200) as with_bse_score_200
                 FROM ml_features
                 GROUP BY exchange
             """
@@ -144,18 +173,36 @@ def update_sentiment_scores(exchange: str = None, exact_match: bool = True):
         logger.info("Update Summary:")
         logger.info("="*60)
         if exchange:
-            total, score_50, score_100 = results[0]
-            logger.info(f"Exchange: {exchange}")
-            logger.info(f"  Total records: {total}")
-            logger.info(f"  Records with sentiment_score_50: {score_50}")
-            logger.info(f"  Records with sentiment_score_100: {score_100}")
-        else:
-            for row in results:
-                exch, total, score_50, score_100 = row
-                logger.info(f"Exchange: {exch}")
+            if exchange == 'BSE':
+                total, bse_score_100, bse_score_200 = results[0]
+                logger.info(f"Exchange: {exchange}")
+                logger.info(f"  Total records: {total}")
+                logger.info(f"  Records with bse_sentiment_score_100: {bse_score_100}")
+                logger.info(f"  Records with bse_sentiment_score_200: {bse_score_200}")
+            else:
+                total, score_50, score_100 = results[0]
+                logger.info(f"Exchange: {exchange}")
                 logger.info(f"  Total records: {total}")
                 logger.info(f"  Records with sentiment_score_50: {score_50}")
                 logger.info(f"  Records with sentiment_score_100: {score_100}")
+        else:
+            for row in results:
+                if len(row) == 6:  # All exchanges with both NSE and BSE columns
+                    exch, total, score_50, score_100, bse_score_100, bse_score_200 = row
+                    logger.info(f"Exchange: {exch}")
+                    logger.info(f"  Total records: {total}")
+                    if exch == 'BSE':
+                        logger.info(f"  Records with bse_sentiment_score_100: {bse_score_100}")
+                        logger.info(f"  Records with bse_sentiment_score_200: {bse_score_200}")
+                    else:
+                        logger.info(f"  Records with sentiment_score_50: {score_50}")
+                        logger.info(f"  Records with sentiment_score_100: {score_100}")
+                else:
+                    exch, total, score_50, score_100 = row
+                    logger.info(f"Exchange: {exch}")
+                    logger.info(f"  Total records: {total}")
+                    logger.info(f"  Records with sentiment_score_50: {score_50}")
+                    logger.info(f"  Records with sentiment_score_100: {score_100}")
         logger.info("="*60)
         
     except Exception as e:
@@ -183,21 +230,39 @@ def preview_update(exchange: str = None):
             exchange_params = [exchange]
         
         # Count how many records would be updated (matching timestamps up to minutes)
-        query = f"""
-            SELECT 
-                mf.exchange,
-                COUNT(*) as total_ml_features,
-                COUNT(ms.sentiment_score_50) as records_with_macro_data
-            FROM ml_features mf
-            LEFT JOIN macro_signals ms 
-                ON mf.exchange = ms.exchange 
-                AND DATE_TRUNC('minute', mf.timestamp) = DATE_TRUNC('minute', ms.timestamp)
-                AND ms.sentiment_score_50 IS NOT NULL
-                AND ms.sentiment_score_100 IS NOT NULL
-            WHERE 1=1 {exchange_filter}
-            GROUP BY mf.exchange
-            ORDER BY mf.exchange
-        """
+        # Handle BSE differently
+        if exchange == 'BSE':
+            query = f"""
+                SELECT 
+                    mf.exchange,
+                    COUNT(*) as total_ml_features,
+                    COUNT(ms.bse_sentiment_score_100) as records_with_macro_data
+                FROM ml_features mf
+                LEFT JOIN macro_signals ms 
+                    ON mf.exchange = ms.exchange 
+                    AND DATE_TRUNC('minute', mf.timestamp) = DATE_TRUNC('minute', ms.timestamp)
+                    AND ms.bse_sentiment_score_100 IS NOT NULL
+                    AND ms.bse_sentiment_score_200 IS NOT NULL
+                WHERE 1=1 {exchange_filter}
+                GROUP BY mf.exchange
+                ORDER BY mf.exchange
+            """
+        else:
+            query = f"""
+                SELECT 
+                    mf.exchange,
+                    COUNT(*) as total_ml_features,
+                    COUNT(ms.sentiment_score_50) as records_with_macro_data
+                FROM ml_features mf
+                LEFT JOIN macro_signals ms 
+                    ON mf.exchange = ms.exchange 
+                    AND DATE_TRUNC('minute', mf.timestamp) = DATE_TRUNC('minute', ms.timestamp)
+                    AND ms.sentiment_score_50 IS NOT NULL
+                    AND ms.sentiment_score_100 IS NOT NULL
+                WHERE 1=1 {exchange_filter}
+                GROUP BY mf.exchange
+                ORDER BY mf.exchange
+            """
         cursor.execute(query, exchange_params)
         
         results = cursor.fetchall()
