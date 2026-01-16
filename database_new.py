@@ -769,45 +769,84 @@ def save_option_chain_snapshot(exchange, call_options, put_options, underlying_p
                 sentiment_score_100 = None
                 trin_50 = None
                 trin_100 = None
+                bse_sentiment_score_100 = None
+                bse_sentiment_score_200 = None
                 
                 try:
                     # CRITICAL FIX: Match by minute with better tolerance and use latest available
-                    # Try exact minute match first, then fallback to nearest within 5 minutes
-                    cursor.execute(f'''
-                        SELECT sentiment_score_50, sentiment_score_100, trin_50, trin_100
-                        FROM macro_signals
-                        WHERE exchange = {ph}
-                          AND DATE_TRUNC('minute', timestamp) = DATE_TRUNC('minute', {ph}::timestamp)
-                          AND sentiment_score_50 IS NOT NULL
-                          AND sentiment_score_100 IS NOT NULL
-                        ORDER BY timestamp DESC
-                        LIMIT 1
-                    ''', (exchange, timestamp_iso))
-                    
-                    row = cursor.fetchone()
-                    if not row:
-                        # Fallback: Get nearest within 5 minutes if exact match not found
+                    # For BSE, fetch BSE sentiment scores; for NSE, fetch NSE sentiment scores
+                    if exchange == 'BSE':
+                        # Fetch BSE sentiment scores
+                        cursor.execute(f'''
+                            SELECT bse_sentiment_score_100, bse_sentiment_score_200
+                            FROM macro_signals
+                            WHERE exchange = {ph}
+                              AND DATE_TRUNC('minute', timestamp) = DATE_TRUNC('minute', {ph}::timestamp)
+                              AND bse_sentiment_score_100 IS NOT NULL
+                              AND bse_sentiment_score_200 IS NOT NULL
+                            ORDER BY timestamp DESC
+                            LIMIT 1
+                        ''', (exchange, timestamp_iso))
+                        
+                        row = cursor.fetchone()
+                        if not row:
+                            # Fallback: Get nearest within 5 minutes if exact match not found
+                            cursor.execute(f'''
+                                SELECT bse_sentiment_score_100, bse_sentiment_score_200
+                                FROM macro_signals
+                                WHERE exchange = {ph}
+                                  AND timestamp >= {ph}::timestamp - INTERVAL '5 minutes'
+                                  AND timestamp <= {ph}::timestamp + INTERVAL '5 minutes'
+                                  AND bse_sentiment_score_100 IS NOT NULL
+                                  AND bse_sentiment_score_200 IS NOT NULL
+                                ORDER BY ABS(EXTRACT(EPOCH FROM (timestamp - {ph}::timestamp)))
+                                LIMIT 1
+                            ''', (exchange, timestamp_iso, timestamp_iso, timestamp_iso))
+                            row = cursor.fetchone()
+                        
+                        if row:
+                            bse_sentiment_score_100 = row[0]
+                            bse_sentiment_score_200 = row[1]
+                            logging.debug(f"[{exchange}] Fetched BSE sentiment scores from macro_signals: score_100={bse_sentiment_score_100}, score_200={bse_sentiment_score_200}")
+                        else:
+                            logging.debug(f"[{exchange}] No matching BSE macro_signals found for timestamp {timestamp_iso}, will use NULL")
+                    else:
+                        # Fetch NSE sentiment scores
                         cursor.execute(f'''
                             SELECT sentiment_score_50, sentiment_score_100, trin_50, trin_100
                             FROM macro_signals
                             WHERE exchange = {ph}
-                              AND timestamp >= {ph}::timestamp - INTERVAL '5 minutes'
-                              AND timestamp <= {ph}::timestamp + INTERVAL '5 minutes'
+                              AND DATE_TRUNC('minute', timestamp) = DATE_TRUNC('minute', {ph}::timestamp)
                               AND sentiment_score_50 IS NOT NULL
                               AND sentiment_score_100 IS NOT NULL
-                            ORDER BY ABS(EXTRACT(EPOCH FROM (timestamp - {ph}::timestamp)))
+                            ORDER BY timestamp DESC
                             LIMIT 1
-                        ''', (exchange, timestamp_iso, timestamp_iso, timestamp_iso))
+                        ''', (exchange, timestamp_iso))
+                        
                         row = cursor.fetchone()
-                    
-                    if row:
-                        sentiment_score_50 = row[0]
-                        sentiment_score_100 = row[1]
-                        trin_50 = row[2]
-                        trin_100 = row[3]
-                        logging.debug(f"[{exchange}] Fetched sentiment scores from macro_signals: score_50={sentiment_score_50}, score_100={sentiment_score_100}")
-                    else:
-                        logging.debug(f"[{exchange}] No matching macro_signals found for timestamp {timestamp_iso}, will use NULL (not fallback to ml_features_dict)")
+                        if not row:
+                            # Fallback: Get nearest within 5 minutes if exact match not found
+                            cursor.execute(f'''
+                                SELECT sentiment_score_50, sentiment_score_100, trin_50, trin_100
+                                FROM macro_signals
+                                WHERE exchange = {ph}
+                                  AND timestamp >= {ph}::timestamp - INTERVAL '5 minutes'
+                                  AND timestamp <= {ph}::timestamp + INTERVAL '5 minutes'
+                                  AND sentiment_score_50 IS NOT NULL
+                                  AND sentiment_score_100 IS NOT NULL
+                                ORDER BY ABS(EXTRACT(EPOCH FROM (timestamp - {ph}::timestamp)))
+                                LIMIT 1
+                            ''', (exchange, timestamp_iso, timestamp_iso, timestamp_iso))
+                            row = cursor.fetchone()
+                        
+                        if row:
+                            sentiment_score_50 = row[0]
+                            sentiment_score_100 = row[1]
+                            trin_50 = row[2]
+                            trin_100 = row[3]
+                            logging.debug(f"[{exchange}] Fetched sentiment scores from macro_signals: score_50={sentiment_score_50}, score_100={sentiment_score_100}")
+                        else:
+                            logging.debug(f"[{exchange}] No matching macro_signals found for timestamp {timestamp_iso}, will use NULL (not fallback to ml_features_dict)")
                 except Exception as e:
                     logging.warning(f"[{exchange}] Could not fetch sentiment scores from macro_signals: {e}")
                 
@@ -847,6 +886,9 @@ def save_option_chain_snapshot(exchange, call_options, put_options, underlying_p
                     sentiment_score_100,
                     trin_50,
                     trin_100,
+                    # BSE sentiment features (from macro_signals table, only for BSE exchange)
+                    bse_sentiment_score_100,
+                    bse_sentiment_score_200,
                     # NSE Option Chain Features
                     ml_features_dict.get('oi_next_sentiment'),
                     ml_features_dict.get('nse_next_oi_call_total'),
@@ -878,6 +920,7 @@ def save_option_chain_snapshot(exchange, call_options, put_options, underlying_p
                     "gamma_flip_level", "ce_volume_to_oi_ratio", "pe_volume_to_oi_ratio",
                     "news_sentiment_score",
                     "sentiment_score_50", "sentiment_score_100", "trin_50", "trin_100",
+                    "bse_sentiment_score_100", "bse_sentiment_score_200",
                     "oi_next_sentiment",
                     "nse_next_oi_call_total", "nse_next_oi_put_total",
                     "nse_next_oi_change_call_total", "nse_next_oi_change_put_total",

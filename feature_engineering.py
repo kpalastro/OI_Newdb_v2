@@ -306,11 +306,11 @@ def _parse_bse_option_chain_data(option_chain_data: Dict) -> Dict[str, float]:
         Dictionary with aggregated metrics:
         - total_oi_call (from tot_C_Open_Interest or aggregated from Table)
         - total_oi_put (from tot_Open_Interest or aggregated from Table)
-        - total_oi_change_call (0.0 - BSE API always returns 0 for change)
-        - total_oi_change_put (0.0 - BSE API always returns 0 for change)
+        - total_oi_change_call (aggregated from C_Absolute_Change_OI in Table[])
+        - total_oi_change_put (aggregated from Absolute_Change_OI in Table[])
         - total_volume_call
         - total_volume_put
-        - oi_change_diff_put_call (0.0 since OI change is always 0)
+        - oi_change_diff_put_call (PUT change - CALL change)
     """
     try:
         # BSE API structure: 
@@ -367,6 +367,8 @@ def _parse_bse_option_chain_data(option_chain_data: Dict) -> Dict[str, float]:
         aggregated_vol_put = 0.0
         aggregated_oi_call = 0.0
         aggregated_oi_put = 0.0
+        aggregated_oi_change_call = 0.0
+        aggregated_oi_change_put = 0.0
         
         for item in table_data:
             # CALL volume (C_ prefix)
@@ -400,6 +402,22 @@ def _parse_bse_option_chain_data(option_chain_data: Dict) -> Dict[str, float]:
                     aggregated_oi_put += float(str(oi).replace(',', '').replace(' ', ''))
                 except (ValueError, AttributeError):
                     pass
+            
+            # CALL Change in OI (C_Absolute_Change_OI)
+            c_oi_change = item.get('C_Absolute_Change_OI', '')
+            if c_oi_change and c_oi_change != '':
+                try:
+                    aggregated_oi_change_call += float(str(c_oi_change).replace(',', '').replace(' ', ''))
+                except (ValueError, AttributeError):
+                    pass
+            
+            # PUT Change in OI (Absolute_Change_OI)
+            oi_change = item.get('Absolute_Change_OI', '')
+            if oi_change and oi_change != '':
+                try:
+                    aggregated_oi_change_put += float(str(oi_change).replace(',', '').replace(' ', ''))
+                except (ValueError, AttributeError):
+                    pass
         
         # Use aggregated values if root totals are 0 or missing
         if total_volume_call == 0.0 and aggregated_vol_call > 0.0:
@@ -412,13 +430,13 @@ def _parse_bse_option_chain_data(option_chain_data: Dict) -> Dict[str, float]:
         if total_oi_put == 0.0 and aggregated_oi_put > 0.0:
             total_oi_put = aggregated_oi_put
         
-        # BSE API provides OI but Change in OI is always "0" in the response
-        # C_Absolute_Change_OI and Absolute_Change_OI are always "0"
-        total_oi_change_call = 0.0
-        total_oi_change_put = 0.0
+        # BSE API provides Change in OI in Table[] array (C_Absolute_Change_OI and Absolute_Change_OI)
+        # There's no root-level total for change, so we use aggregated values
+        total_oi_change_call = aggregated_oi_change_call
+        total_oi_change_put = aggregated_oi_change_put
         
-        # Calculate difference: PUT - CALL (for OI change, will be 0.0)
-        oi_change_diff_put_call = 0.0
+        # Calculate difference: PUT - CALL
+        oi_change_diff_put_call = total_oi_change_put - total_oi_change_call
         
         return {
             'total_oi_call': total_oi_call,
