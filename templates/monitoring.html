@@ -459,7 +459,11 @@
             return `hsl(${Math.min(140, hue)}, 70%, 45%)`;
         }
 
-        document.addEventListener('DOMContentLoaded', loadHealth);
+        document.addEventListener('DOMContentLoaded', () => {
+            loadHealth();
+            // Auto-refresh every 30 seconds to show latest backtest results
+            setInterval(loadHealth, 30000);
+        });
     </script>
 </body>
 </html>

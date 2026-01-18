@@ -146,6 +146,8 @@ class BacktestEngine:
             LOGGER.error("Models not loaded for exchange %s. Aborting backtest.", self.config.exchange)
             return BacktestResult(self.config, [], {}, [], raw_rows=len(frame))
 
+        LOGGER.warning("Starting backtest: %d rows, min_confidence=%.2f", len(frame), self.config.min_confidence)
+
         trades: List[TradeRecord] = []
         predictions: List[int] = []
         actual_returns: List[float] = []
@@ -158,92 +160,114 @@ class BacktestEngine:
         trade_limit = self.config.max_trades or float("inf")
         total_cost_rate = (self.config.transaction_cost_bps + self.config.slippage_bps) / 10000.0
 
-        for _, row in frame.iterrows():
-            if len(trades) >= trade_limit:
-                break
+        # Debug counters
+        hold_count = 0
+        low_confidence_count = 0
+        zero_direction_count = 0
+        zero_capital_count = 0
+        signal_count = {'BUY': 0, 'SELL': 0, 'HOLD': 0}
 
-            features = {col: float(row.get(col, 0.0)) for col in REQUIRED_FEATURE_COLUMNS}
+        try:
+            for _, row in frame.iterrows():
+                if len(trades) >= trade_limit:
+                    break
 
-            # Use RL-aware router if enabled; else fallback to MLSignalGenerator
-            if self.router:
-                rl_state = RLState(
-                    features=np.array(list(features.values()), dtype=float),
-                    current_position=0.0,
-                    portfolio_value=self.config.account_size,
-                    timestamp=str(row.get('timestamp'))
+                features = {col: float(row.get(col, 0.0)) for col in REQUIRED_FEATURE_COLUMNS}
+
+                # Use RL-aware router if enabled; else fallback to MLSignalGenerator
+                if self.router:
+                    rl_state = RLState(
+                        features=np.array(list(features.values()), dtype=float),
+                        current_position=0.0,
+                        portfolio_value=self.config.account_size,
+                        timestamp=str(row.get('timestamp'))
+                    )
+                    sig_obj: StrategySignal = self.router.generate_signal(
+                        features_dict=features,
+                        feature_sequence=None,
+                        state=rl_state
+                    )
+                    signal = sig_obj.signal
+                    confidence = float(sig_obj.confidence)
+                    rationale = sig_obj.rationale
+                    metadata = sig_obj.metadata
+                else:
+                    signal, confidence, rationale, metadata = self.signal_engine.generate_signal(features)
+
+                signal_count[signal] = signal_count.get(signal, 0) + 1
+
+                if signal == 'HOLD':
+                    hold_count += 1
+                    continue
+                if confidence < self.config.min_confidence:
+                    low_confidence_count += 1
+                    continue
+
+                direction = 1 if signal == 'BUY' else -1 if signal == 'SELL' else 0
+                if direction == 0:
+                    zero_direction_count += 1
+                    continue
+
+                # Risk inputs: fallback defaults if router is used and no metrics available
+                win_rate = 0.55
+                avg_wl = 1.0
+                if not self.router and hasattr(self.signal_engine, "strategy_metrics"):
+                    win_rate = self.signal_engine.strategy_metrics.get('win_rate', win_rate)
+                    avg_wl = self.signal_engine.strategy_metrics.get('avg_w_l_ratio', avg_wl)
+
+                risk = get_optimal_position_size(
+                    ml_confidence=confidence,
+                    win_rate=win_rate,
+                    avg_win_loss_ratio=avg_wl,
+                    max_risk=self.config.max_risk_per_trade,
+                    account_size=self.config.account_size,
+                    margin_per_lot=self.config.margin_per_lot,
                 )
-                sig_obj: StrategySignal = self.router.generate_signal(
-                    features_dict=features,
-                    feature_sequence=None,
-                    state=rl_state
+                capital_allocated = risk.get('capital_allocated', 0.0)
+                if capital_allocated <= 0.0:
+                    zero_capital_count += 1
+                    continue
+
+                future_return = float(row['future_return'])
+                gross_pnl = direction * future_return * capital_allocated
+                transaction_cost = abs(capital_allocated) * total_cost_rate
+                net_pnl = gross_pnl - transaction_cost
+
+                predictions.append(direction)
+                actual_returns.append(future_return)
+                position_sizes.append(capital_allocated)
+                net_pnls.append(net_pnl)
+
+                gross_equity += gross_pnl
+                net_equity += net_pnl
+                equity_curve.append({
+                    "timestamp": row['timestamp'],
+                    "gross_equity": round(gross_equity, 2),
+                    "net_equity": round(net_equity, 2),
+                })
+
+                trade = TradeRecord(
+                    timestamp=row['timestamp'],
+                    signal=signal,
+                    direction=direction,
+                    confidence=confidence,
+                    rationale=rationale,
+                    future_return=future_return,
+                    gross_pnl=gross_pnl,
+                    net_pnl=net_pnl,
+                    transaction_cost=transaction_cost,
+                    capital_allocated=capital_allocated,
+                    position_fraction=risk.get('fraction', 0.0),
+                    recommended_lots=risk.get('recommended_lots', 0),
+                    metadata=metadata or {},
                 )
-                signal = sig_obj.signal
-                confidence = float(sig_obj.confidence)
-                rationale = sig_obj.rationale
-                metadata = sig_obj.metadata
-            else:
-                signal, confidence, rationale, metadata = self.signal_engine.generate_signal(features)
-
-            if signal == 'HOLD' or confidence < self.config.min_confidence:
-                continue
-
-            direction = 1 if signal == 'BUY' else -1 if signal == 'SELL' else 0
-            if direction == 0:
-                continue
-
-            # Risk inputs: fallback defaults if router is used and no metrics available
-            win_rate = 0.55
-            avg_wl = 1.0
-            if not self.router and hasattr(self.signal_engine, "strategy_metrics"):
-                win_rate = self.signal_engine.strategy_metrics.get('win_rate', win_rate)
-                avg_wl = self.signal_engine.strategy_metrics.get('avg_w_l_ratio', avg_wl)
-
-            risk = get_optimal_position_size(
-                ml_confidence=confidence,
-                win_rate=win_rate,
-                avg_win_loss_ratio=avg_wl,
-                max_risk=self.config.max_risk_per_trade,
-                account_size=self.config.account_size,
-                margin_per_lot=self.config.margin_per_lot,
-            )
-            capital_allocated = risk.get('capital_allocated', 0.0)
-            if capital_allocated <= 0.0:
-                continue
-
-            future_return = float(row['future_return'])
-            gross_pnl = direction * future_return * capital_allocated
-            transaction_cost = abs(capital_allocated) * total_cost_rate
-            net_pnl = gross_pnl - transaction_cost
-
-            predictions.append(direction)
-            actual_returns.append(future_return)
-            position_sizes.append(capital_allocated)
-            net_pnls.append(net_pnl)
-
-            gross_equity += gross_pnl
-            net_equity += net_pnl
-            equity_curve.append({
-                "timestamp": row['timestamp'],
-                "gross_equity": round(gross_equity, 2),
-                "net_equity": round(net_equity, 2),
-            })
-
-            trade = TradeRecord(
-                timestamp=row['timestamp'],
-                signal=signal,
-                direction=direction,
-                confidence=confidence,
-                rationale=rationale,
-                future_return=future_return,
-                gross_pnl=gross_pnl,
-                net_pnl=net_pnl,
-                transaction_cost=transaction_cost,
-                capital_allocated=capital_allocated,
-                position_fraction=risk.get('fraction', 0.0),
-                recommended_lots=risk.get('recommended_lots', 0),
-                metadata=metadata or {},
-            )
-            trades.append(trade)
+                trades.append(trade)
+        except Exception as e:
+            LOGGER.error("Error during backtest loop: %s", e, exc_info=True)
+            LOGGER.warning("Partial results: Processed %d rows, generated %d trades", 
+                          len(frame), len(trades))
+            LOGGER.warning("Signal breakdown so far: BUY=%d, SELL=%d, HOLD=%d", 
+                          signal_count.get('BUY', 0), signal_count.get('SELL', 0), signal_count.get('HOLD', 0))
 
         metrics: Dict[str, float] = {}
         if predictions:
@@ -257,9 +281,16 @@ class BacktestEngine:
             metrics['gross_max_drawdown'] = _compute_drawdown([point['gross_equity'] for point in equity_curve])
         else:
             LOGGER.warning("No qualifying trades generated for %s.", self.config.exchange)
+            LOGGER.warning("Signal breakdown: BUY=%d, SELL=%d, HOLD=%d", 
+                       signal_count.get('BUY', 0), signal_count.get('SELL', 0), signal_count.get('HOLD', 0))
+            LOGGER.warning("Filtered out: HOLD=%d, Low confidence (<%.2f)=%d, Zero direction=%d, Zero capital=%d",
+                       hold_count, self.config.min_confidence, low_confidence_count, 
+                       zero_direction_count, zero_capital_count)
 
         # Run Monte Carlo Simulation
         result = BacktestResult(self.config, trades, metrics, equity_curve, raw_rows=len(frame))
+        
+        LOGGER.warning("Backtest completed: %d trades generated", len(trades))
         
         if trades:
             try:

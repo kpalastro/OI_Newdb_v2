@@ -47,7 +47,8 @@ REQUIRED_FEATURE_COLUMNS = [
     'total_itm_oi_ce', 'total_itm_oi_pe',
     'atm_shift_intensity', 'itm_ce_breadth', 'itm_pe_breadth',
     'percent_oichange_fut_3m', 'itm_oi_ce_pct_change_3m_wavg',
-    'itm_oi_pe_pct_change_3m_wavg', 'put_call_iv_skew', 'otm_put_premium',
+    'itm_oi_pe_pct_change_3m_wavg', 'itm_volume_ce_pct_change_3m_wavg',
+    'itm_volume_pe_pct_change_3m_wavg', 'put_call_iv_skew', 'otm_put_premium',
     'net_gamma_exposure', 'gamma_flip_level', 'dealer_vanna_exposure', 'dealer_charm_exposure',
     'ce_volume_to_oi_ratio', 'pe_volume_to_oi_ratio',
     'ce_oi_spike', 'pe_oi_spike',
@@ -122,7 +123,18 @@ REQUIRED_FEATURE_COLUMNS = [
     'itm_oi_bullish_divergence',
     'eod_position_winding',
     'itm_oi_flow_direction',
-    'is_eod_winding_window'
+    'is_eod_winding_window',
+    # Enhanced ITM Dominance Features (Based on Analysis)
+    'itm_dominance_signal',
+    'itm_divergence_strength',
+    'itm_dominance_ratio',
+    'is_post_1145',
+    'itm_dominance_signal_weighted',
+    'itm_volume_dominance_signal',
+    'itm_volume_divergence_strength',
+    'itm_combined_dominance_signal',
+    'itm_signal_agreement',
+    'itm_post_1145_enhanced_signal'
 ]
 
 
@@ -148,6 +160,8 @@ class OptionAggregates:
     itm_pe_breadth: float = 0.0
     itm_oi_ce_pct_change_3m_wavg: float = 0.0
     itm_oi_pe_pct_change_3m_wavg: float = 0.0
+    itm_volume_ce_pct_change_3m_wavg: float = 0.0
+    itm_volume_pe_pct_change_3m_wavg: float = 0.0
     bid_ask_spread: float = 0.0
     order_book_imbalance: float = 0.0
     net_gamma_exposure: float = 0.0
@@ -668,6 +682,8 @@ def engineer_live_feature_set(
         'itm_pe_breadth': option_aggs.itm_pe_breadth,
         'itm_oi_ce_pct_change_3m_wavg': option_aggs.itm_oi_ce_pct_change_3m_wavg,
         'itm_oi_pe_pct_change_3m_wavg': option_aggs.itm_oi_pe_pct_change_3m_wavg,
+        'itm_volume_ce_pct_change_3m_wavg': option_aggs.itm_volume_ce_pct_change_3m_wavg,
+        'itm_volume_pe_pct_change_3m_wavg': option_aggs.itm_volume_pe_pct_change_3m_wavg,
         'ce_pct_change_3m': option_aggs.ce_pct_change_3m,
         'pe_pct_change_3m': option_aggs.pe_pct_change_3m,
         'bid_ask_spread': option_aggs.bid_ask_spread or micro_features.get('bid_ask_spread', 0.0),
@@ -833,6 +849,60 @@ def engineer_live_feature_set(
 
     # 4. Net Flow Direction: +ve = bear pressure (CE adds / PE leaves), -ve = bull pressure
     features['itm_oi_flow_direction'] = itm_ce_change - itm_pe_change
+    
+    # --- Enhanced ITM Dominance Features (Based on Analysis) ---
+    # Key Insight: When ITM PE Δ% > ITM CE Δ%, trend is usually negative (bearish)
+    #              When ITM CE Δ% > ITM PE Δ%, trend is usually positive (bullish)
+    
+    # 5. ITM Dominance Signal: Direct comparison of PE vs CE deltas
+    # Positive = PE dominance (bearish), Negative = CE dominance (bullish)
+    features['itm_dominance_signal'] = itm_pe_change - itm_ce_change
+    
+    # 6. ITM Divergence Strength: Magnitude of the difference (absolute value)
+    # Higher values indicate stronger directional signal
+    features['itm_divergence_strength'] = abs(itm_pe_change - itm_ce_change)
+    
+    # 7. ITM Dominance Ratio: Ratio of PE to CE change (handles division by zero)
+    # > 1.0 = PE dominance (bearish), < 1.0 = CE dominance (bullish)
+    if abs(itm_ce_change) > 0.01:  # Avoid division by very small numbers
+        features['itm_dominance_ratio'] = itm_pe_change / itm_ce_change
+    else:
+        # If CE change is near zero, use a large ratio if PE is positive, small if negative
+        features['itm_dominance_ratio'] = 10.0 if itm_pe_change > 0 else -10.0 if itm_pe_change < 0 else 1.0
+    
+    # 8. Time-of-Day Weighted ITM Dominance (Post-11:45 AM behavior)
+    # Model performance degraded after 11:45 AM, so add time-weighted features
+    is_post_1145 = 1.0 if (features['hour'] == 11 and features['minute'] >= 45) or features['hour'] >= 12 else 0.0
+    features['is_post_1145'] = is_post_1145
+    
+    # Weighted dominance signal (stronger weight after 11:45 AM)
+    features['itm_dominance_signal_weighted'] = features['itm_dominance_signal'] * (1.0 + 0.5 * is_post_1145)
+    
+    # 9. Volume-based ITM Dominance (using volume deltas)
+    itm_vol_ce_change = features.get('itm_volume_ce_pct_change_3m_wavg', 0.0)
+    itm_vol_pe_change = features.get('itm_volume_pe_pct_change_3m_wavg', 0.0)
+    
+    # Volume dominance signal: Positive = PE volume dominance (bearish), Negative = CE volume dominance (bullish)
+    features['itm_volume_dominance_signal'] = itm_vol_pe_change - itm_vol_ce_change
+    features['itm_volume_divergence_strength'] = abs(itm_vol_pe_change - itm_vol_ce_change)
+    
+    # 10. Combined OI + Volume Dominance Signal
+    # Combines both OI and Volume signals for stronger directional confirmation
+    # Normalize using tanh for smooth scaling to [-1, 1] range
+    oi_signal = features['itm_dominance_signal']
+    vol_signal = features['itm_volume_dominance_signal']
+    oi_signal_norm = np.tanh(oi_signal / 10.0) if abs(oi_signal) > 0 else 0.0
+    vol_signal_norm = np.tanh(vol_signal / 10.0) if abs(vol_signal) > 0 else 0.0
+    features['itm_combined_dominance_signal'] = 0.6 * oi_signal_norm + 0.4 * vol_signal_norm
+    
+    # 11. ITM Signal Agreement: Whether OI and Volume signals agree (1.0 = agree, 0.0 = disagree)
+    # Agreement when both are positive (bearish) or both are negative (bullish)
+    oi_sign = 1.0 if features['itm_dominance_signal'] > 0 else -1.0 if features['itm_dominance_signal'] < 0 else 0.0
+    vol_sign = 1.0 if features['itm_volume_dominance_signal'] > 0 else -1.0 if features['itm_volume_dominance_signal'] < 0 else 0.0
+    features['itm_signal_agreement'] = 1.0 if oi_sign * vol_sign > 0 else 0.0
+    
+    # 12. Post-11:45 AM Enhanced Signal (time-weighted combined signal)
+    features['itm_post_1145_enhanced_signal'] = features['itm_combined_dominance_signal'] * (1.0 + 0.7 * is_post_1145)
 
     # Option Chain Features (NSE or BSE) - based on ATM strike from open price
     try:
@@ -957,6 +1027,7 @@ def prepare_training_features(raw_features: pd.DataFrame, required_columns: Opti
     if raw_features is None or raw_features.empty:
         return pd.DataFrame()
 
+    print("DEBUG: Copying and setting up DataFrame...")
     df = raw_features.copy()
     if 'timestamp' not in df.columns:
         raise FeatureEngineeringError("Expected 'timestamp' column in historical feature set.")
@@ -967,52 +1038,176 @@ def prepare_training_features(raw_features: pd.DataFrame, required_columns: Opti
     
     # Remove duplicate columns if any
     df = df.loc[:, ~df.columns.duplicated()]
+    print(f"DEBUG: DataFrame indexed. Shape: {df.shape}")
 
     required = required_columns or REQUIRED_FEATURE_COLUMNS
     # Ensure unique
     required = list(dict.fromkeys(required))
     
-    for column in required:
-        if column not in df.columns:
-            df[column] = 0.0
+    print("DEBUG: Adding missing columns...")
+    # Collect all missing columns first, then add at once to avoid fragmentation
+    missing_columns = {col: 0.0 for col in required if col not in df.columns}
+    if missing_columns:
+        missing_df = pd.DataFrame(missing_columns, index=df.index)
+        df = pd.concat([df, missing_df], axis=1)
 
     numeric_cols = [col for col in required if col in df.columns]
     # Ensure numeric_cols is unique
     numeric_cols = list(dict.fromkeys(numeric_cols))
     
+    print("DEBUG: Converting to numeric...")
     df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors='coerce').fillna(0.0)
 
     # Convert non-stationary features to stationary (Z-scores)
     # PCR can drift over time, so use Z-score over rolling window (5 days = ~750 minutes in trading hours)
+    # Use pd.concat to avoid DataFrame fragmentation warning
+    new_columns = {}
     if 'pcr_total_oi' in df.columns:
+        print("DEBUG: Calculating PCR z-score (this may take a moment)...")
         window_minutes = 750  # Approximately 5 trading days
         rolling_mean = df['pcr_total_oi'].rolling(window=window_minutes, min_periods=50).mean()
         rolling_std = df['pcr_total_oi'].rolling(window=window_minutes, min_periods=50).std()
         
         # Calculate Z-score: (value - rolling_mean) / rolling_std
         # Use fillna to handle initial periods with insufficient data
-        df['pcr_total_oi_zscore'] = ((df['pcr_total_oi'] - rolling_mean) / rolling_std).fillna(0.0)
+        pcr_zscore = ((df['pcr_total_oi'] - rolling_mean) / rolling_std).fillna(0.0)
         
         # Replace infinite values with 0 (can occur if std is 0)
-        df['pcr_total_oi_zscore'] = df['pcr_total_oi_zscore'].replace([np.inf, -np.inf], 0.0)
+        pcr_zscore = pcr_zscore.replace([np.inf, -np.inf], 0.0)
+        
+        new_columns['pcr_total_oi_zscore'] = pcr_zscore
         
         # Add to required columns if not already present
         if 'pcr_total_oi_zscore' not in required:
             required = list(required) + ['pcr_total_oi_zscore']
+        print("DEBUG: PCR z-score calculation complete.")
+    
+    # Add all new columns at once to avoid fragmentation
+    if new_columns:
+        df = pd.concat([df, pd.DataFrame(new_columns, index=df.index)], axis=1)
 
     # Rebuild temporal metadata to avoid stale payload values
+    print("DEBUG: Rebuilding temporal features...")
+    # Drop existing temporal columns first to avoid duplicates
+    temporal_col_names = ['hour', 'minute', 'time_to_close_hours', 'is_opening_hour', 
+                          'is_closing_hour', 'is_lunch_hour', 'sin_time', 'cos_time']
+    df = df.drop(columns=[col for col in temporal_col_names if col in df.columns])
+    
+    # Collect all temporal columns first, then add at once to avoid fragmentation
     index = df.index
-    df['hour'] = index.hour
-    df['minute'] = index.minute
-    df['time_to_close_hours'] = index.map(_time_to_close_from_timestamp)
-    df['is_opening_hour'] = (df['hour'] == 9).astype(int)
-    df['is_closing_hour'] = (df['hour'] >= 15).astype(int)
-    df['is_lunch_hour'] = ((df['hour'] >= 12) & (df['hour'] < 14)).astype(int)
+    temporal_cols = {
+        'hour': index.hour,
+        'minute': index.minute,
+    }
+    
+    # Optimize time_to_close calculation - use vectorized operations
+    if len(index) > 0:
+        print(f"DEBUG: Calculating time_to_close for {len(index)} rows...")
+        # More efficient: calculate once per unique date, then broadcast
+        market_close_time = time(15, 30)
+        # Convert index to datetime if needed
+        if not isinstance(index, pd.DatetimeIndex):
+            index = pd.to_datetime(index)
+        
+        # Calculate time_to_close using vectorized operations
+        dates = index.date
+        times = index.time
+        time_to_close_list = []
+        
+        for i, (dt, tm) in enumerate(zip(dates, times)):
+            try:
+                dt_ist = to_ist(datetime.combine(dt, tm))
+                market_close_dt = to_ist(datetime.combine(dt, market_close_time))
+                time_to_close = max((market_close_dt - dt_ist).total_seconds() / 3600.0, 0.0)
+                time_to_close_list.append(time_to_close)
+            except:
+                time_to_close_list.append(0.0)
+        
+        temporal_cols['time_to_close_hours'] = pd.Series(time_to_close_list, index=index)
+        print("DEBUG: time_to_close calculation complete.")
+    
+    # Add derived temporal features
+    hour_series = pd.Series(temporal_cols['hour'], index=df.index)
+    temporal_cols['is_opening_hour'] = (hour_series == 9).astype(int)
+    temporal_cols['is_closing_hour'] = (hour_series >= 15).astype(int)
+    temporal_cols['is_lunch_hour'] = ((hour_series >= 12) & (hour_series < 14)).astype(int)
     
     # Cyclical time encoding
-    minutes_since_midnight = df['hour'] * 60 + df['minute']
-    df['sin_time'] = np.sin(2 * np.pi * minutes_since_midnight / 1440)
-    df['cos_time'] = np.cos(2 * np.pi * minutes_since_midnight / 1440)
+    minutes_since_midnight = hour_series * 60 + temporal_cols['minute']
+    temporal_cols['sin_time'] = np.sin(2 * np.pi * minutes_since_midnight / 1440)
+    temporal_cols['cos_time'] = np.cos(2 * np.pi * minutes_since_midnight / 1440)
+    
+    # Add all temporal columns at once
+    df = pd.concat([df, pd.DataFrame(temporal_cols, index=df.index)], axis=1)
+    
+    # Calculate Enhanced ITM Dominance Features for historical data
+    # These features are derived from base ITM features and should be calculated here
+    # to ensure they're available for training
+    print("DEBUG: Calculating enhanced ITM dominance features...")
+    enhanced_itm_features = {}
+    
+    # Get base ITM features
+    itm_ce_change = df.get('itm_oi_ce_pct_change_3m_wavg', pd.Series(0.0, index=df.index))
+    itm_pe_change = df.get('itm_oi_pe_pct_change_3m_wavg', pd.Series(0.0, index=df.index))
+    itm_vol_ce_change = df.get('itm_volume_ce_pct_change_3m_wavg', pd.Series(0.0, index=df.index))
+    itm_vol_pe_change = df.get('itm_volume_pe_pct_change_3m_wavg', pd.Series(0.0, index=df.index))
+    hour_col = df.get('hour', pd.Series(0, index=df.index))
+    minute_col = df.get('minute', pd.Series(0, index=df.index))
+    
+    # 1. ITM Dominance Signal: PE - CE (positive = bearish, negative = bullish)
+    enhanced_itm_features['itm_dominance_signal'] = itm_pe_change - itm_ce_change
+    
+    # 2. ITM Divergence Strength: Magnitude of difference
+    enhanced_itm_features['itm_divergence_strength'] = (itm_pe_change - itm_ce_change).abs()
+    
+    # 3. ITM Dominance Ratio: PE / CE (handling division by zero)
+    ce_change_abs = itm_ce_change.abs()
+    enhanced_itm_features['itm_dominance_ratio'] = np.where(
+        ce_change_abs > 0.01,
+        itm_pe_change / itm_ce_change,
+        np.where(itm_pe_change > 0, 10.0, np.where(itm_pe_change < 0, -10.0, 1.0))
+    )
+    
+    # 4. Post-11:45 AM indicator
+    is_post_1145_mask = ((hour_col == 11) & (minute_col >= 45)) | (hour_col >= 12)
+    enhanced_itm_features['is_post_1145'] = np.where(is_post_1145_mask, 1.0, 0.0)
+    
+    # 5. Time-weighted dominance signal
+    enhanced_itm_features['itm_dominance_signal_weighted'] = enhanced_itm_features['itm_dominance_signal'] * (
+        1.0 + 0.5 * enhanced_itm_features['is_post_1145']
+    )
+    
+    # 6. Volume-based ITM Dominance
+    enhanced_itm_features['itm_volume_dominance_signal'] = itm_vol_pe_change - itm_vol_ce_change
+    enhanced_itm_features['itm_volume_divergence_strength'] = (itm_vol_pe_change - itm_vol_ce_change).abs()
+    
+    # 7. Combined OI + Volume Dominance Signal (normalized using tanh for smooth scaling)
+    oi_signal = enhanced_itm_features['itm_dominance_signal']
+    vol_signal = enhanced_itm_features['itm_volume_dominance_signal']
+    # Use tanh to normalize signals to [-1, 1] range while preserving sign and magnitude
+    oi_signal_norm = np.tanh(oi_signal / 10.0)  # Scale by 10 to make tanh more sensitive
+    vol_signal_norm = np.tanh(vol_signal / 10.0)
+    enhanced_itm_features['itm_combined_dominance_signal'] = 0.6 * oi_signal_norm + 0.4 * vol_signal_norm
+    
+    # 8. ITM Signal Agreement (OI and Volume signals agree)
+    oi_sign = np.sign(oi_signal)
+    vol_sign = np.sign(vol_signal)
+    enhanced_itm_features['itm_signal_agreement'] = np.where(
+        oi_sign * vol_sign > 0, 1.0, 0.0
+    )
+    
+    # 9. Post-11:45 AM Enhanced Signal
+    enhanced_itm_features['itm_post_1145_enhanced_signal'] = enhanced_itm_features['itm_combined_dominance_signal'] * (
+        1.0 + 0.7 * enhanced_itm_features['is_post_1145']
+    )
+    
+    # Convert to DataFrame and add to df
+    enhanced_df = pd.DataFrame(enhanced_itm_features, index=df.index)
+    df = pd.concat([df, enhanced_df], axis=1)
+    
+    # Final check: remove any duplicate columns that might have slipped through
+    df = df.loc[:, ~df.columns.duplicated()]
+    print(f"DEBUG: Feature preparation complete. Final shape: {df.shape}")
 
     return df
 
@@ -1230,6 +1425,7 @@ def _calculate_option_aggregates(
             'itm_flags': [],
             'itm_pct_change_3m': [],
             'oi_for_weight': [],
+            'volume_for_weight': [],
             'bid_ask_spread': [],
             'imbalance': [],
             'gamma_proxy': [],
@@ -1250,6 +1446,7 @@ def _calculate_option_aggregates(
             if is_itm and pct is not None:
                 raw['itm_pct_change_3m'].append(float(pct))
                 raw['oi_for_weight'].append(latest_oi)
+                raw['volume_for_weight'].append(float(opt.get('volume') or 0.0))
             spread = opt.get('spread')
             if spread is not None:
                 raw['bid_ask_spread'].append(float(spread))
@@ -1312,6 +1509,8 @@ def _calculate_option_aggregates(
     agg.itm_pe_breadth = _safe_ratio(sum(put_stats['itm_flags']), len(put_options))
     agg.itm_oi_ce_pct_change_3m_wavg = _weighted_change(call_stats)
     agg.itm_oi_pe_pct_change_3m_wavg = _weighted_change(put_stats)
+    agg.itm_volume_ce_pct_change_3m_wavg = _weighted_change_volume(call_stats)
+    agg.itm_volume_pe_pct_change_3m_wavg = _weighted_change_volume(put_stats)
     agg.bid_ask_spread = _safe_mean(call_stats['bid_ask_spread'] + put_stats['bid_ask_spread'])
     agg.order_book_imbalance = _safe_mean(call_stats['imbalance'] + put_stats['imbalance'])
     
@@ -1749,6 +1948,20 @@ def _safe_div(numerator: float, denominator: float, fallback: float = 0.0, min_d
 
 def _weighted_change(stats: Dict[str, List[float]]) -> float:
     weights = stats.get('oi_for_weight', [])
+    changes = stats.get('itm_pct_change_3m', [])
+    if not weights or not changes:
+        return 0.0
+    weights = np.array(weights)
+    changes = np.array(changes)
+    total = weights.sum()
+    if total == 0:
+        return 0.0
+    return float(np.dot(weights, changes) / total)
+
+
+def _weighted_change_volume(stats: Dict[str, List[float]]) -> float:
+    """Calculate volume-weighted ITM percentage change (similar to OI-weighted but using volume)."""
+    weights = stats.get('volume_for_weight', [])
     changes = stats.get('itm_pct_change_3m', [])
     if not weights or not changes:
         return 0.0

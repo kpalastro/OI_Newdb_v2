@@ -76,6 +76,14 @@ def main() -> None:
         with open(args.output, "w", encoding="utf-8") as handle:
             json.dump(result.to_dict(), handle, indent=2)
         logging.info("Saved backtest report to %s", args.output)
+    else:
+        # Auto-save to dashboard location if no output specified
+        backtest_dir = Path('reports') / 'backtests'
+        backtest_dir.mkdir(parents=True, exist_ok=True)
+        dashboard_file = backtest_dir / f'{args.exchange.upper()}.json'
+        with open(dashboard_file, "w", encoding="utf-8") as handle:
+            json.dump(result.to_dict(), handle, indent=2)
+        logging.warning("Saved backtest report to dashboard location: %s", dashboard_file)
 
 
 if __name__ == "__main__":
