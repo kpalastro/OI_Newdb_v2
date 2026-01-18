@@ -44,7 +44,12 @@ from feature_engineering import (
     REQUIRED_FEATURE_COLUMNS,
     prepare_training_features,
 )
-from model_registry import ModelRegistry
+try:
+    from model_registry import ModelRegistry
+    MODEL_REGISTRY_AVAILABLE = True
+except ImportError:
+    MODEL_REGISTRY_AVAILABLE = False
+    logging.warning("model_registry not available. Model registration will be skipped.")
 
 # Suppress warnings for cleaner logs
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -797,72 +802,75 @@ def train(exchange: str, days: int = 90):
     print("DEBUG: Final training complete.")
     
     # 6. Register models in registry
-    print("DEBUG: Registering models in model registry...")
-    try:
-        registry = ModelRegistry()
-        print("DEBUG: Model registry initialized.")
-        
-        # Register main LightGBM model (regime_models.pkl contains all regime models)
-        main_model_path = model_paths.get('regime_models')
-        if main_model_path and main_model_path.exists():
-            registry.register_model(
-                exchange=exchange,
-                model_type='lightgbm_regime',
-                model_path=main_model_path,
-                validation_metrics={
-                    'f1_score': avg_f1,
-                    'precision': avg_precision,
-                    'recall': avg_recall,
-                    'accuracy': np.mean([x.get('accuracy', avg_f1) for x in cv_results])
-                },
-                training_data_start=start_date,
-                training_data_end=end_date,
-                training_samples=len(df),
-                cv_metrics=cv_results,
-                artifact_paths=[
-                    str(model_paths.get('hmm_model', '')),
-                    str(model_paths.get('feature_selector', '')),
-                    str(model_paths.get('model_features', '')),
-                    str(model_paths.get('swing_ensemble', ''))
-                ],
-                notes=f"Trained with {days} days of data, {len(feature_cols)} features"
-            )
-            logging.info("✓ Model registered in model registry")
-            print("DEBUG: Main LightGBM model registered.")
-        
-        # Register HMM model separately
-        print("DEBUG: Registering HMM model...")
-        hmm_model_path = model_paths.get('hmm_model')
-        if hmm_model_path and hmm_model_path.exists():
-            registry.register_model(
-                exchange=exchange,
-                model_type='hmm_regime',
-                model_path=hmm_model_path,
-                validation_metrics={'cv_f1': avg_f1},
-                training_data_start=start_date,
-                training_data_end=end_date,
-                training_samples=len(df),
-                notes="HMM regime detection model"
-            )
-        
-        # Register expiry transformer if it exists
-        expiry_model_path = model_paths.get('expiry_transformer')
-        if expiry_model_path and expiry_model_path.exists():
-            registry.register_model(
-                exchange=exchange,
-                model_type='expiry_transformer',
-                model_path=expiry_model_path,
-                validation_metrics={'cv_f1': avg_f1},
-                training_data_start=start_date,
-                training_data_end=end_date,
-                training_samples=len(df),
-                notes="Expiry day transformer (PyTorch)"
-            )
-        
-    except Exception as e:
-        logging.warning(f"Failed to register models in registry: {e}")
-        logging.warning("Training completed successfully, but model registration failed")
-        print(f"DEBUG: Model registration failed: {e}")
+    if MODEL_REGISTRY_AVAILABLE:
+        print("DEBUG: Registering models in model registry...")
+        try:
+            registry = ModelRegistry()
+            print("DEBUG: Model registry initialized.")
+            
+            # Register main LightGBM model (regime_models.pkl contains all regime models)
+            main_model_path = model_paths.get('regime_models')
+            if main_model_path and main_model_path.exists():
+                registry.register_model(
+                    exchange=exchange,
+                    model_type='lightgbm_regime',
+                    model_path=main_model_path,
+                    validation_metrics={
+                        'f1_score': avg_f1,
+                        'precision': avg_precision,
+                        'recall': avg_recall,
+                        'accuracy': np.mean([x.get('accuracy', avg_f1) for x in cv_results])
+                    },
+                    training_data_start=start_date,
+                    training_data_end=end_date,
+                    training_samples=len(df),
+                    cv_metrics=cv_results,
+                    artifact_paths=[
+                        str(model_paths.get('hmm_model', '')),
+                        str(model_paths.get('feature_selector', '')),
+                        str(model_paths.get('model_features', '')),
+                        str(model_paths.get('swing_ensemble', ''))
+                    ],
+                    notes=f"Trained with {days} days of data, {len(feature_cols)} features"
+                )
+                logging.info("✓ Model registered in model registry")
+                print("DEBUG: Main LightGBM model registered.")
+            
+            # Register HMM model separately
+            print("DEBUG: Registering HMM model...")
+            hmm_model_path = model_paths.get('hmm_model')
+            if hmm_model_path and hmm_model_path.exists():
+                registry.register_model(
+                    exchange=exchange,
+                    model_type='hmm_regime',
+                    model_path=hmm_model_path,
+                    validation_metrics={'cv_f1': avg_f1},
+                    training_data_start=start_date,
+                    training_data_end=end_date,
+                    training_samples=len(df),
+                    notes="HMM regime detection model"
+                )
+            
+            # Register expiry transformer if it exists
+            expiry_model_path = model_paths.get('expiry_transformer')
+            if expiry_model_path and expiry_model_path.exists():
+                registry.register_model(
+                    exchange=exchange,
+                    model_type='expiry_transformer',
+                    model_path=expiry_model_path,
+                    validation_metrics={'cv_f1': avg_f1},
+                    training_data_start=start_date,
+                    training_data_end=end_date,
+                    training_samples=len(df),
+                    notes="Expiry day transformer (PyTorch)"
+                )
+        except Exception as e:
+            logging.warning(f"Failed to register models in registry: {e}")
+            logging.warning("Training completed successfully, but model registration failed")
+            print(f"DEBUG: Model registration failed: {e}")
+    else:
+        logging.info("Model registry not available. Skipping model registration.")
+        print("DEBUG: Model registry not available. Skipping registration.")
     
     print("DEBUG: Training pipeline complete!")
 
