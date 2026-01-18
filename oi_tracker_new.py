@@ -1084,9 +1084,12 @@ class FeatureWorker(MpProcess):
                 'last_update': now.strftime('%H:%M:%S'),
                 'status': 'Live',
                 'pcr': ml_features_dict.get('pcr_total_oi', 0),
+                'pcrv': ml_features_dict.get('pcr_total_volume', 0),
                 'vix': vix_value,
                 'itm_oi_ce_pct_change': ml_features_dict.get('itm_oi_ce_pct_change_3m_wavg', 0),
                 'itm_oi_pe_pct_change': ml_features_dict.get('itm_oi_pe_pct_change_3m_wavg', 0),
+                'itm_volume_ce_pct_change': ml_features_dict.get('itm_volume_ce_pct_change_3m_wavg', 0),
+                'itm_volume_pe_pct_change': ml_features_dict.get('itm_volume_pe_pct_change_3m_wavg', 0),
                 'underlying_future_symbol': handler_proxy.futures_symbol,
                 'underlying_future_price': round(futures_price or 0, 2),
                 'underlying_future_oi': fut_oi,
@@ -4573,58 +4576,173 @@ def api_multi_expiry_analytics():
     """API endpoint to fetch multi-expiry analytics data."""
     try:
         exchange = request.args.get('exchange', 'NSE')
-        hours = int(request.args.get('hours', 8))
         limit = int(request.args.get('limit', 200))
         
-        from database_new import get_db_connection, release_db_connection
-        from datetime import datetime, timedelta
+        from database_new import get_db_connection, release_db_connection, _coerce_iso_timestamp
+        from datetime import datetime, timedelta, date
         from time_utils import now_ist
         
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Calculate time filter
-        cutoff_time = now_ist() - timedelta(hours=hours)
+        # Check if date filter is provided
+        selected_date = request.args.get('date')
+        hours = None  # Initialize hours variable
+        if selected_date:
+            # Filter by specific date
+            try:
+                # Validate date format
+                filter_date = datetime.strptime(selected_date, '%Y-%m-%d').date()
+                # Use simple DATE() comparison - timestamps are likely stored without timezone
+                # or already in IST. DATE() extracts the date part regardless of timezone.
+                time_filter = "DATE(a.timestamp) = %s::date"
+                time_params = (selected_date,)
+                filter_description = f"date={selected_date}"
+            except ValueError:
+                return jsonify({
+                    'success': False,
+                    'error': 'Invalid date format. Use YYYY-MM-DD.'
+                }), 400
+        else:
+            # Filter by hours (default)
+            hours = int(request.args.get('hours', 8))
+            cutoff_time = now_ist() - timedelta(hours=hours)
+            time_filter = "a.timestamp >= %s"
+            time_params = (cutoff_time,)
+            filter_description = f"hours={hours}"
         
         query = """
             SELECT 
-                timestamp,
-                exchange,
-                base_strike,
-                oi_change_diff_put_call,
-                sentiment_score_oi_change,
-                sentiment_label,
-                trend_direction,
-                is_turning_point,
-                prediction_signal,
-                pc_oi_ratio,
-                pc_volume_ratio,
-                total_volume_all,
-                volume_ma5,
-                is_volume_spike,
-                iv_skew,
-                iv_diff_put_call,
-                oi_change_diff_ma5,
-                oi_change_diff_ma15,
-                oi_change_diff_ma30,
-                total_oi_change_all
-            FROM nse_multi_expiry_analytics
-            WHERE exchange = %s
-              AND timestamp >= %s
-            ORDER BY timestamp DESC
+                a.timestamp,
+                a.exchange,
+                a.base_strike,
+                a.oi_change_diff_put_call,
+                a.sentiment_score_oi_change,
+                a.sentiment_label,
+                a.trend_direction,
+                a.is_turning_point,
+                a.prediction_signal,
+                a.pc_oi_ratio,
+                a.pc_volume_ratio,
+                a.total_volume_all,
+                a.volume_ma5,
+                a.is_volume_spike,
+                a.iv_skew,
+                a.iv_diff_put_call,
+                a.oi_change_diff_ma5,
+                a.oi_change_diff_ma15,
+                a.oi_change_diff_ma30,
+                a.total_oi_change_all,
+                -- ITM Features from ml_features (direct columns)
+                m.itm_oi_ce_pct_change_3m_wavg,
+                m.itm_oi_pe_pct_change_3m_wavg,
+                m.pcr_total_volume,
+                m.total_itm_oi_ce,
+                m.total_itm_oi_pe,
+                m.itm_ce_breadth,
+                m.itm_pe_breadth,
+                -- ITM Volume features from feature_payload JSONB (safely extract with NULL handling)
+                -- Extract as TEXT first, then parse in Python to avoid JSON parsing errors
+                m.feature_payload AS feature_payload_raw
+            FROM nse_multi_expiry_analytics a
+            LEFT JOIN ml_features m ON 
+                DATE_TRUNC('minute', a.timestamp) = DATE_TRUNC('minute', m.timestamp)
+                AND a.exchange = m.exchange
+            WHERE a.exchange = %s
+              AND {time_filter}
+            ORDER BY a.timestamp ASC
             LIMIT %s
-        """
+        """.format(time_filter=time_filter)
         
-        cursor.execute(query, (exchange, cutoff_time, limit))
+        # For date filtering, use a much higher limit to get all records for the day
+        # A typical trading day has ~375 minutes (9:15 AM to 3:30 PM)
+        effective_limit = 10000 if selected_date else limit
+        cursor.execute(query, (exchange,) + time_params + (effective_limit,))
         columns = [desc[0] for desc in cursor.description]
         rows = cursor.fetchall()
         
         data = []
+        import json
+        
+        # If no data from analytics view, try fetching from ml_features directly
+        if len(rows) == 0 and selected_date:
+            try:
+                logging.debug(f"No data from analytics view for {selected_date}, checking ml_features directly...")
+                ml_query = """
+                    SELECT 
+                        m.timestamp,
+                        %s as exchange,
+                        NULL as base_strike,
+                        NULL as oi_change_diff_put_call,
+                        NULL as sentiment_score_oi_change,
+                        NULL as sentiment_label,
+                        NULL as trend_direction,
+                        NULL as is_turning_point,
+                        NULL as prediction_signal,
+                        NULL as pc_oi_ratio,
+                        NULL as pc_volume_ratio,
+                        NULL as total_volume_all,
+                        NULL as volume_ma5,
+                        NULL as is_volume_spike,
+                        NULL as iv_skew,
+                        NULL as iv_diff_put_call,
+                        NULL as oi_change_diff_ma5,
+                        NULL as oi_change_diff_ma15,
+                        NULL as oi_change_diff_ma30,
+                        NULL as total_oi_change_all,
+                        m.itm_oi_ce_pct_change_3m_wavg,
+                        m.itm_oi_pe_pct_change_3m_wavg,
+                        m.pcr_total_volume,
+                        m.total_itm_oi_ce,
+                        m.total_itm_oi_pe,
+                        m.itm_ce_breadth,
+                        m.itm_pe_breadth,
+                        m.feature_payload AS feature_payload_raw
+                    FROM ml_features m
+                    WHERE m.exchange = %s
+                      AND DATE(m.timestamp) = %s::date
+                    ORDER BY m.timestamp ASC
+                    LIMIT %s
+                """
+                # Use high limit for date filtering to get all records for the day
+                effective_limit = 10000 if selected_date else limit
+                cursor.execute(ml_query, (exchange, exchange, selected_date, effective_limit))
+                rows = cursor.fetchall()
+                if rows:
+                    columns = [desc[0] for desc in cursor.description]
+                    logging.debug(f"Found {len(rows)} records in ml_features for {selected_date}")
+            except Exception as e:
+                logging.debug(f"Error checking ml_features directly: {e}")
+        
         for row in rows:
             record = dict(zip(columns, row))
             # Convert datetime to ISO string for JSON serialization
-            if isinstance(record['timestamp'], datetime):
+            if isinstance(record.get('timestamp'), datetime):
                 record['timestamp'] = record['timestamp'].isoformat()
+            
+            # Parse feature_payload JSON to extract ITM volume features
+            feature_payload_raw = record.pop('feature_payload_raw', None)
+            if feature_payload_raw:
+                try:
+                    # Try to parse as JSON string
+                    if isinstance(feature_payload_raw, str):
+                        payload = json.loads(feature_payload_raw)
+                    else:
+                        # Already a dict (from psycopg2 JSONB handling)
+                        payload = feature_payload_raw
+                    
+                    # Extract ITM volume features
+                    record['itm_volume_ce_pct_change_3m_wavg'] = payload.get('itm_volume_ce_pct_change_3m_wavg')
+                    record['itm_volume_pe_pct_change_3m_wavg'] = payload.get('itm_volume_pe_pct_change_3m_wavg')
+                except (json.JSONDecodeError, TypeError, AttributeError) as e:
+                    # If JSON parsing fails, set to None
+                    logging.debug(f"Failed to parse feature_payload: {e}")
+                    record['itm_volume_ce_pct_change_3m_wavg'] = None
+                    record['itm_volume_pe_pct_change_3m_wavg'] = None
+            else:
+                record['itm_volume_ce_pct_change_3m_wavg'] = None
+                record['itm_volume_pe_pct_change_3m_wavg'] = None
+            
             # Handle Decimal types from PostgreSQL
             for key, value in record.items():
                 if hasattr(value, '__float__') and not isinstance(value, (int, float, bool, type(None), str)):
@@ -4637,15 +4755,74 @@ def api_multi_expiry_analytics():
         release_db_connection(conn)
         
         # Log for debugging
-        logging.debug(f"Multi-expiry analytics query: exchange={exchange}, hours={hours}, limit={limit}, returned {len(data)} records")
+        logging.debug(f"Multi-expiry analytics query: exchange={exchange}, {filter_description}, limit={limit}, returned {len(data)} records")
         
-        return jsonify({
+        # If no data found with date filter, check if data exists for that date at all (for debugging)
+        if selected_date and len(data) == 0:
+            try:
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                # Check what dates are available - try simple DATE() first
+                check_query = """
+                    SELECT 
+                        DATE(timestamp) as trade_date,
+                        COUNT(*) as cnt,
+                        MIN(timestamp) as min_ts,
+                        MAX(timestamp) as max_ts
+                    FROM nse_multi_expiry_analytics
+                    WHERE exchange = %s
+                    GROUP BY DATE(timestamp)
+                    ORDER BY trade_date DESC
+                    LIMIT 10
+                """
+                cursor.execute(check_query, (exchange,))
+                available_dates = cursor.fetchall()
+                release_db_connection(conn)
+                if available_dates:
+                    date_list = [f"{str(row[0])} ({row[1]} records, {row[2]} to {row[3]})" for row in available_dates]
+                    logging.info(f"No data for {selected_date}. Available dates for {exchange}: {', '.join(date_list)}")
+                else:
+                    logging.info(f"No data found in database for exchange={exchange}")
+            except Exception as e:
+                logging.debug(f"Could not check available dates: {e}")
+        
+        response_data = {
             'success': True,
             'data': data,
             'count': len(data),
-            'exchange': exchange,
-            'time_range_hours': hours
-        })
+            'exchange': exchange
+        }
+        
+        if selected_date:
+            response_data['selected_date'] = selected_date
+            # If no data found, include available dates in response
+            if len(data) == 0:
+                try:
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    check_query = """
+                        SELECT 
+                            DATE(timestamp) as trade_date,
+                            COUNT(*) as cnt
+                        FROM nse_multi_expiry_analytics
+                        WHERE exchange = %s
+                        GROUP BY DATE(timestamp)
+                        ORDER BY trade_date DESC
+                        LIMIT 10
+                    """
+                    cursor.execute(check_query, (exchange,))
+                    available_dates = cursor.fetchall()
+                    release_db_connection(conn)
+                    if available_dates:
+                        date_list = [str(row[0]) for row in available_dates]
+                        response_data['available_dates'] = date_list
+                        response_data['message'] = f"No data found for {selected_date}. Available dates: {', '.join(date_list)}"
+                except Exception as e:
+                    logging.debug(f"Could not fetch available dates: {e}")
+        else:
+            response_data['time_range_hours'] = hours
+        
+        return jsonify(response_data)
         
     except Exception as e:
         logging.error(f"Error fetching multi-expiry analytics: {e}", exc_info=True)

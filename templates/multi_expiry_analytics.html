@@ -188,6 +188,13 @@
             </select>
         </div>
         <div class="control-group">
+            <label for="filterType">Filter Type</label>
+            <select id="filterType" onchange="toggleFilterType()">
+                <option value="hours" selected>By Hours</option>
+                <option value="date">By Date</option>
+            </select>
+        </div>
+        <div class="control-group" id="hoursGroup">
             <label for="hours">Hours to Display</label>
             <select id="hours">
                 <option value="1">Last 1 Hour</option>
@@ -196,6 +203,10 @@
                 <option value="24">Last 24 Hours</option>
                 <option value="48">Last 48 Hours</option>
             </select>
+        </div>
+        <div class="control-group" id="dateGroup" style="display: none;">
+            <label for="selectedDate">Select Date</label>
+            <input type="date" id="selectedDate" />
         </div>
         <div class="control-group">
             <label for="limit">Max Records</label>
@@ -245,6 +256,21 @@
             <div class="chart-title">Prediction Signals Over Time</div>
             <div id="predictionChart" style="height: 400px;"></div>
         </div>
+
+        <div class="chart-container">
+            <div class="chart-title">ITM CE/PE Divergence Analysis (OI-based)</div>
+            <div id="itmOIDivergenceChart" style="height: 400px;"></div>
+        </div>
+
+        <div class="chart-container">
+            <div class="chart-title">ITM CE/PE Divergence Analysis (Volume-based)</div>
+            <div id="itmVolumeDivergenceChart" style="height: 400px;"></div>
+        </div>
+
+        <div class="chart-container">
+            <div class="chart-title">ITM Dominance Signal & Trend Direction</div>
+            <div id="itmDominanceChart" style="height: 400px;"></div>
+        </div>
     </div>
 
     <div class="chart-container">
@@ -266,16 +292,50 @@
             }
         }
 
+        function toggleFilterType() {
+            const filterType = document.getElementById('filterType').value;
+            const hoursGroup = document.getElementById('hoursGroup');
+            const dateGroup = document.getElementById('dateGroup');
+            
+            if (filterType === 'date') {
+                hoursGroup.style.display = 'none';
+                dateGroup.style.display = 'flex';
+                // Set default date to today if not set
+                if (!document.getElementById('selectedDate').value) {
+                    const today = new Date().toISOString().split('T')[0];
+                    document.getElementById('selectedDate').value = today;
+                }
+            } else {
+                hoursGroup.style.display = 'flex';
+                dateGroup.style.display = 'none';
+            }
+        }
+
         async function loadData() {
             const exchange = document.getElementById('exchange').value;
-            const hours = parseInt(document.getElementById('hours').value);
+            const filterType = document.getElementById('filterType').value;
             const limit = parseInt(document.getElementById('limit').value);
             
             showStatus('Loading data...', 'loading');
             document.getElementById('refreshBtn').disabled = true;
 
             try {
-                const response = await fetch(`/api/multi-expiry-analytics?exchange=${exchange}&hours=${hours}&limit=${limit}`);
+                let url = `/api/multi-expiry-analytics?exchange=${exchange}&limit=${limit}`;
+                
+                if (filterType === 'date') {
+                    const selectedDate = document.getElementById('selectedDate').value;
+                    if (!selectedDate) {
+                        showStatus('Please select a date', 'error');
+                        document.getElementById('refreshBtn').disabled = false;
+                        return;
+                    }
+                    url += `&date=${selectedDate}`;
+                } else {
+                    const hours = parseInt(document.getElementById('hours').value);
+                    url += `&hours=${hours}`;
+                }
+                
+                const response = await fetch(url);
                 if (!response.ok) {
                     throw new Error(`HTTP error! status: ${response.status}`);
                 }
@@ -287,11 +347,10 @@
 
                 currentData = data.data || [];
                 
-                if (currentData.length === 0) {
-                    showStatus(`No data available for ${data.exchange || exchange} exchange in the last ${data.time_range_hours || hours} hours. Try selecting NSE or a different time range.`, 'error');
-                    return;
-                }
-
+                // Check if any charts have data before showing error
+                const hasAnyData = currentData.length > 0;
+                
+                // Try to plot charts - they will hide themselves if no data
                 updateSummaryCards(currentData);
                 plotOIAndSentiment(currentData);
                 plotPCRatios(currentData);
@@ -299,9 +358,34 @@
                 plotVolumeAnalysis(currentData);
                 plotIVAnalysis(currentData);
                 plotPredictionSignals(currentData);
+                plotITMOIDivergence(currentData);
+                plotITMVolumeDivergence(currentData);
+                plotITMDominance(currentData);
                 updateTurningPoints(currentData);
-
-                showStatus(`Loaded ${currentData.length} records`, 'success');
+                
+                // Check if any charts are visible after plotting
+                const visibleCharts = Array.from(document.querySelectorAll('.chart-container')).filter(
+                    el => el.style.display !== 'none'
+                );
+                
+                // Only show error if no data AND no visible charts
+                if (!hasAnyData && visibleCharts.length === 0) {
+                    const filterType = document.getElementById('filterType').value;
+                    let errorMsg = `No data available for ${data.exchange || exchange} exchange`;
+                    if (filterType === 'date') {
+                        const selectedDate = document.getElementById('selectedDate').value;
+                        errorMsg += ` on ${selectedDate}`;
+                    } else {
+                        errorMsg += ` in the last ${data.time_range_hours || document.getElementById('hours').value} hours`;
+                    }
+                    errorMsg += '. Try selecting NSE or a different time range.';
+                    showStatus(errorMsg, 'error');
+                } else if (hasAnyData) {
+                    showStatus(`Loaded ${currentData.length} records`, 'success');
+                } else {
+                    // Some charts have data, hide error message
+                    document.getElementById('status').style.display = 'none';
+                }
             } catch (error) {
                 console.error('Error loading data:', error);
                 showStatus(`Error: ${error.message}`, 'error');
@@ -345,11 +429,32 @@
                     <div class="label">IV Skew</div>
                     <div class="value">${latest.iv_skew?.toFixed(3) || 'N/A'}</div>
                 </div>
+                <div class="summary-card ${(latest.itm_oi_pe_pct_change_3m_wavg || 0) > (latest.itm_oi_ce_pct_change_3m_wavg || 0) ? 'bearish' : 'bullish'}">
+                    <div class="label">ITM Dominance</div>
+                    <div class="value">${((latest.itm_oi_pe_pct_change_3m_wavg || 0) - (latest.itm_oi_ce_pct_change_3m_wavg || 0)).toFixed(2)}%</div>
+                </div>
+                <div class="summary-card">
+                    <div class="label">PCRV</div>
+                    <div class="value">${latest.pcr_total_volume?.toFixed(2) || 'N/A'}</div>
+                </div>
             `;
             document.getElementById('summaryCards').innerHTML = cardsHtml;
         }
 
         function plotOIAndSentiment(data) {
+            // Check if data is available for this chart
+            const hasData = data.some(d => 
+                (d.oi_change_diff_put_call !== null && d.oi_change_diff_put_call !== undefined) ||
+                (d.sentiment_score_oi_change !== null && d.sentiment_score_oi_change !== undefined)
+            );
+            
+            const chartContainer = document.querySelector('#oiSentimentChart').closest('.chart-container');
+            if (!hasData) {
+                chartContainer.style.display = 'none';
+                return;
+            }
+            chartContainer.style.display = 'block';
+            
             const timestamps = data.map(d => d.timestamp);
             const oiChangeDiff = data.map(d => d.oi_change_diff_put_call || 0);
             const sentimentScore = data.map(d => d.sentiment_score_oi_change || 50);
@@ -411,6 +516,19 @@
         }
 
         function plotPCRatios(data) {
+            // Check if data is available for this chart
+            const hasData = data.some(d => 
+                (d.pc_oi_ratio !== null && d.pc_oi_ratio !== undefined) ||
+                (d.pc_volume_ratio !== null && d.pc_volume_ratio !== undefined)
+            );
+            
+            const chartContainer = document.querySelector('#pcRatioChart').closest('.chart-container');
+            if (!hasData) {
+                chartContainer.style.display = 'none';
+                return;
+            }
+            chartContainer.style.display = 'block';
+            
             const timestamps = data.map(d => d.timestamp);
             const pcOI = data.map(d => d.pc_oi_ratio || 1);
             const pcVolume = data.map(d => d.pc_volume_ratio || 1);
@@ -462,6 +580,19 @@
         }
 
         function plotTrendAnalysis(data) {
+            // Check if data is available for this chart
+            const hasData = data.some(d => 
+                (d.oi_change_diff_put_call !== null && d.oi_change_diff_put_call !== undefined) ||
+                (d.oi_change_diff_ma5 !== null && d.oi_change_diff_ma5 !== undefined)
+            );
+            
+            const chartContainer = document.querySelector('#trendChart').closest('.chart-container');
+            if (!hasData) {
+                chartContainer.style.display = 'none';
+                return;
+            }
+            chartContainer.style.display = 'block';
+            
             const timestamps = data.map(d => d.timestamp);
             const current = data.map(d => d.oi_change_diff_put_call || 0);
             const ma5 = data.map(d => d.oi_change_diff_ma5 || null);
@@ -524,6 +655,18 @@
         }
 
         function plotVolumeAnalysis(data) {
+            // Check if data is available for this chart
+            const hasData = data.some(d => 
+                (d.total_volume_all !== null && d.total_volume_all !== undefined)
+            );
+            
+            const chartContainer = document.querySelector('#volumeChart').closest('.chart-container');
+            if (!hasData) {
+                chartContainer.style.display = 'none';
+                return;
+            }
+            chartContainer.style.display = 'block';
+            
             const timestamps = data.map(d => d.timestamp);
             const volume = data.map(d => d.total_volume_all || 0);
             const volumeMA5 = data.map(d => d.volume_ma5 || null);
@@ -574,6 +717,19 @@
         }
 
         function plotIVAnalysis(data) {
+            // Check if data is available for this chart
+            const hasData = data.some(d => 
+                (d.iv_skew !== null && d.iv_skew !== undefined) ||
+                (d.iv_diff_put_call !== null && d.iv_diff_put_call !== undefined)
+            );
+            
+            const chartContainer = document.querySelector('#ivChart').closest('.chart-container');
+            if (!hasData) {
+                chartContainer.style.display = 'none';
+                return;
+            }
+            chartContainer.style.display = 'block';
+            
             const timestamps = data.map(d => d.timestamp);
             const ivSkew = data.map(d => d.iv_skew || null);
             const ivDiff = data.map(d => d.iv_diff_put_call || null);
@@ -635,6 +791,18 @@
         }
 
         function plotPredictionSignals(data) {
+            // Check if data is available for this chart
+            const hasData = data.some(d => 
+                (d.prediction_signal !== null && d.prediction_signal !== undefined)
+            );
+            
+            const chartContainer = document.querySelector('#predictionChart').closest('.chart-container');
+            if (!hasData) {
+                chartContainer.style.display = 'none';
+                return;
+            }
+            chartContainer.style.display = 'block';
+            
             const timestamps = data.map(d => d.timestamp);
             const predictions = data.map(d => {
                 const signal = d.prediction_signal || 'NEUTRAL_PREDICT';
@@ -681,6 +849,426 @@
             };
 
             Plotly.newPlot('predictionChart', [trace], layout, {responsive: true});
+        }
+
+        function plotITMOIDivergence(data) {
+            // Check if data is available for this chart
+            const hasData = data.some(d => 
+                (d.itm_oi_ce_pct_change_3m_wavg !== null && d.itm_oi_ce_pct_change_3m_wavg !== undefined) ||
+                (d.itm_oi_pe_pct_change_3m_wavg !== null && d.itm_oi_pe_pct_change_3m_wavg !== undefined)
+            );
+            
+            const chartContainer = document.querySelector('#itmOIDivergenceChart').closest('.chart-container');
+            if (!hasData) {
+                chartContainer.style.display = 'none';
+                return;
+            }
+            chartContainer.style.display = 'block';
+            
+            const timestamps = data.map(d => d.timestamp);
+            const itmCeChange = data.map(d => d.itm_oi_ce_pct_change_3m_wavg || 0);
+            const itmPeChange = data.map(d => d.itm_oi_pe_pct_change_3m_wavg || 0);
+            const itmDominance = data.map(d => (d.itm_oi_pe_pct_change_3m_wavg || 0) - (d.itm_oi_ce_pct_change_3m_wavg || 0));
+
+            const trace1 = {
+                x: timestamps,
+                y: itmCeChange,
+                name: 'ITM CE Δ% (OI-weighted)',
+                type: 'scatter',
+                mode: 'lines+markers',
+                line: { color: '#60a5fa', width: 2 },
+                marker: { size: 4 },
+                yaxis: 'y'
+            };
+
+            const trace2 = {
+                x: timestamps,
+                y: itmPeChange,
+                name: 'ITM PE Δ% (OI-weighted)',
+                type: 'scatter',
+                mode: 'lines+markers',
+                line: { color: '#f87171', width: 2 },
+                marker: { size: 4 },
+                yaxis: 'y'
+            };
+
+            const trace3 = {
+                x: timestamps,
+                y: itmDominance,
+                name: 'ITM PE Dominance (PE - CE)',
+                type: 'scatter',
+                mode: 'lines',
+                line: { color: '#fb923c', width: 2, dash: 'dash' },
+                yaxis: 'y2'
+            };
+
+            const trace4 = {
+                x: timestamps,
+                y: Array(timestamps.length).fill(0),
+                name: 'Zero Line',
+                type: 'scatter',
+                mode: 'lines',
+                line: { color: '#94a3b8', width: 1, dash: 'dot' },
+                yaxis: 'y'
+            };
+
+            const layout = {
+                title: { text: '', font: { color: '#e2e8f0' } },
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                font: { color: '#e2e8f0' },
+                xaxis: { 
+                    title: 'Time',
+                    gridcolor: '#475569',
+                    zeroline: false
+                },
+                yaxis: {
+                    title: 'ITM Δ% (OI-weighted)',
+                    side: 'left',
+                    gridcolor: '#475569',
+                    zeroline: true,
+                    zerolinecolor: '#94a3b8'
+                },
+                yaxis2: {
+                    title: 'Dominance Signal',
+                    side: 'right',
+                    overlaying: 'y',
+                    gridcolor: '#475569',
+                    zeroline: true,
+                    zerolinecolor: '#94a3b8'
+                },
+                legend: { 
+                    x: 0,
+                    y: 1,
+                    bgcolor: 'rgba(30, 41, 59, 0.8)'
+                },
+                hovermode: 'x unified',
+                shapes: [{
+                    type: 'rect',
+                    xref: 'paper',
+                    yref: 'y2',
+                    x0: 0,
+                    y0: 0,
+                    x1: 1,
+                    y1: 'max',
+                    fillcolor: 'rgba(248, 113, 113, 0.1)',
+                    layer: 'below',
+                    line: { width: 0 }
+                }, {
+                    type: 'rect',
+                    xref: 'paper',
+                    yref: 'y2',
+                    x0: 0,
+                    y0: 'min',
+                    x1: 1,
+                    y1: 0,
+                    fillcolor: 'rgba(96, 165, 250, 0.1)',
+                    layer: 'below',
+                    line: { width: 0 }
+                }]
+            };
+
+            Plotly.newPlot('itmOIDivergenceChart', [trace1, trace2, trace3, trace4], layout, {responsive: true});
+        }
+
+        function plotITMVolumeDivergence(data) {
+            // Check if data is available for this chart
+            const hasData = data.some(d => 
+                (d.itm_volume_ce_pct_change_3m_wavg !== null && d.itm_volume_ce_pct_change_3m_wavg !== undefined) ||
+                (d.itm_volume_pe_pct_change_3m_wavg !== null && d.itm_volume_pe_pct_change_3m_wavg !== undefined) ||
+                (d.pcr_total_volume !== null && d.pcr_total_volume !== undefined)
+            );
+            
+            const chartContainer = document.querySelector('#itmVolumeDivergenceChart').closest('.chart-container');
+            if (!hasData) {
+                chartContainer.style.display = 'none';
+                return;
+            }
+            chartContainer.style.display = 'block';
+            
+            const timestamps = data.map(d => d.timestamp);
+            const itmCeVolChange = data.map(d => d.itm_volume_ce_pct_change_3m_wavg || 0);
+            const itmPeVolChange = data.map(d => d.itm_volume_pe_pct_change_3m_wavg || 0);
+            const itmVolDominance = data.map(d => (d.itm_volume_pe_pct_change_3m_wavg || 0) - (d.itm_volume_ce_pct_change_3m_wavg || 0));
+            const pcrv = data.map(d => d.pcr_total_volume || 0);
+
+            const trace1 = {
+                x: timestamps,
+                y: itmCeVolChange,
+                name: 'ITM CE Vol Δ% (Volume-weighted)',
+                type: 'scatter',
+                mode: 'lines+markers',
+                line: { color: '#60a5fa', width: 2 },
+                marker: { size: 4 },
+                yaxis: 'y'
+            };
+
+            const trace2 = {
+                x: timestamps,
+                y: itmPeVolChange,
+                name: 'ITM PE Vol Δ% (Volume-weighted)',
+                type: 'scatter',
+                mode: 'lines+markers',
+                line: { color: '#f87171', width: 2 },
+                marker: { size: 4 },
+                yaxis: 'y'
+            };
+
+            const trace3 = {
+                x: timestamps,
+                y: itmVolDominance,
+                name: 'ITM Vol Dominance (PE - CE)',
+                type: 'scatter',
+                mode: 'lines',
+                line: { color: '#fb923c', width: 2, dash: 'dash' },
+                yaxis: 'y2'
+            };
+
+            const trace4 = {
+                x: timestamps,
+                y: pcrv,
+                name: 'PCRV (Put/Call Volume Ratio)',
+                type: 'scatter',
+                mode: 'lines',
+                line: { color: '#a78bfa', width: 2, dash: 'dot' },
+                yaxis: 'y3'
+            };
+
+            const trace5 = {
+                x: timestamps,
+                y: Array(timestamps.length).fill(0),
+                name: 'Zero Line',
+                type: 'scatter',
+                mode: 'lines',
+                line: { color: '#94a3b8', width: 1, dash: 'dot' },
+                yaxis: 'y'
+            };
+
+            const layout = {
+                title: { text: '', font: { color: '#e2e8f0' } },
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                font: { color: '#e2e8f0' },
+                xaxis: { 
+                    title: 'Time',
+                    gridcolor: '#475569',
+                    zeroline: false
+                },
+                yaxis: {
+                    title: 'ITM Vol Δ%',
+                    side: 'left',
+                    gridcolor: '#475569',
+                    zeroline: true,
+                    zerolinecolor: '#94a3b8'
+                },
+                yaxis2: {
+                    title: 'Dominance',
+                    side: 'right',
+                    overlaying: 'y',
+                    gridcolor: '#475569',
+                    zeroline: true,
+                    zerolinecolor: '#94a3b8',
+                    position: 0.95
+                },
+                yaxis3: {
+                    title: 'PCRV',
+                    side: 'right',
+                    overlaying: 'y',
+                    gridcolor: '#475569',
+                    zeroline: false,
+                    position: 1.0
+                },
+                legend: { 
+                    x: 0,
+                    y: 1,
+                    bgcolor: 'rgba(30, 41, 59, 0.8)'
+                },
+                hovermode: 'x unified',
+                shapes: [{
+                    type: 'rect',
+                    xref: 'paper',
+                    yref: 'y2',
+                    x0: 0,
+                    y0: 0,
+                    x1: 1,
+                    y1: 'max',
+                    fillcolor: 'rgba(248, 113, 113, 0.1)',
+                    layer: 'below',
+                    line: { width: 0 }
+                }, {
+                    type: 'rect',
+                    xref: 'paper',
+                    yref: 'y2',
+                    x0: 0,
+                    y0: 'min',
+                    x1: 1,
+                    y1: 0,
+                    fillcolor: 'rgba(96, 165, 250, 0.1)',
+                    layer: 'below',
+                    line: { width: 0 }
+                }]
+            };
+
+            Plotly.newPlot('itmVolumeDivergenceChart', [trace1, trace2, trace3, trace4, trace5], layout, {responsive: true});
+        }
+
+        function plotITMDominance(data) {
+            // Check if data is available for this chart (needs both OI and Volume data)
+            const hasData = data.some(d => 
+                ((d.itm_oi_ce_pct_change_3m_wavg !== null && d.itm_oi_ce_pct_change_3m_wavg !== undefined) ||
+                 (d.itm_oi_pe_pct_change_3m_wavg !== null && d.itm_oi_pe_pct_change_3m_wavg !== undefined)) &&
+                ((d.itm_volume_ce_pct_change_3m_wavg !== null && d.itm_volume_ce_pct_change_3m_wavg !== undefined) ||
+                 (d.itm_volume_pe_pct_change_3m_wavg !== null && d.itm_volume_pe_pct_change_3m_wavg !== undefined))
+            );
+            
+            const chartContainer = document.querySelector('#itmDominanceChart').closest('.chart-container');
+            if (!hasData) {
+                chartContainer.style.display = 'none';
+                return;
+            }
+            chartContainer.style.display = 'block';
+            
+            const timestamps = data.map(d => d.timestamp);
+            
+            // Calculate ITM Dominance signals
+            const itmOIDominance = data.map(d => {
+                const ce = d.itm_oi_ce_pct_change_3m_wavg || 0;
+                const pe = d.itm_oi_pe_pct_change_3m_wavg || 0;
+                return pe - ce; // Positive = Bearish, Negative = Bullish
+            });
+            
+            const itmVolDominance = data.map(d => {
+                const ce = d.itm_volume_ce_pct_change_3m_wavg || 0;
+                const pe = d.itm_volume_pe_pct_change_3m_wavg || 0;
+                return pe - ce;
+            });
+            
+            // Create categorical signal: 1 = Bearish (PE > CE), -1 = Bullish (CE > PE), 0 = Neutral
+            const dominanceSignal = data.map(d => {
+                const oiDom = (d.itm_oi_pe_pct_change_3m_wavg || 0) - (d.itm_oi_ce_pct_change_3m_wavg || 0);
+                const volDom = (d.itm_volume_pe_pct_change_3m_wavg || 0) - (d.itm_volume_ce_pct_change_3m_wavg || 0);
+                const threshold = 0.5; // Minimum difference to signal
+                
+                if (oiDom > threshold && volDom > threshold) return 1; // Strong Bearish
+                if (oiDom < -threshold && volDom < -threshold) return -1; // Strong Bullish
+                if (oiDom > threshold || volDom > threshold) return 0.5; // Weak Bearish
+                if (oiDom < -threshold || volDom < -threshold) return -0.5; // Weak Bullish
+                return 0; // Neutral
+            });
+
+            const trace1 = {
+                x: timestamps,
+                y: itmOIDominance,
+                name: 'ITM OI Dominance (PE - CE)',
+                type: 'scatter',
+                mode: 'lines+markers',
+                line: { color: '#fb923c', width: 2 },
+                marker: { size: 4 },
+                yaxis: 'y'
+            };
+
+            const trace2 = {
+                x: timestamps,
+                y: itmVolDominance,
+                name: 'ITM Vol Dominance (PE - CE)',
+                type: 'scatter',
+                mode: 'lines',
+                line: { color: '#a78bfa', width: 2, dash: 'dash' },
+                yaxis: 'y'
+            };
+
+            const trace3 = {
+                x: timestamps,
+                y: dominanceSignal,
+                name: 'Combined Signal',
+                type: 'scatter',
+                mode: 'lines+markers',
+                line: { 
+                    color: '#60a5fa',
+                    width: 3,
+                    shape: 'hv'
+                },
+                marker: { 
+                    size: 8,
+                    color: dominanceSignal.map(s => {
+                        if (s > 0) return '#f87171'; // Bearish - Red
+                        if (s < 0) return '#4ade80'; // Bullish - Green
+                        return '#94a3b8'; // Neutral - Grey
+                    })
+                },
+                yaxis: 'y2'
+            };
+
+            const trace4 = {
+                x: timestamps,
+                y: Array(timestamps.length).fill(0),
+                name: 'Zero Line',
+                type: 'scatter',
+                mode: 'lines',
+                line: { color: '#94a3b8', width: 1, dash: 'dot' },
+                yaxis: 'y'
+            };
+
+            const layout = {
+                title: { text: '', font: { color: '#e2e8f0' } },
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                font: { color: '#e2e8f0' },
+                xaxis: { 
+                    title: 'Time',
+                    gridcolor: '#475569',
+                    zeroline: false
+                },
+                yaxis: {
+                    title: 'Dominance Value',
+                    side: 'left',
+                    gridcolor: '#475569',
+                    zeroline: true,
+                    zerolinecolor: '#94a3b8'
+                },
+                yaxis2: {
+                    title: 'Signal',
+                    side: 'right',
+                    overlaying: 'y',
+                    tickvals: [-1, -0.5, 0, 0.5, 1],
+                    ticktext: ['Strong Bull', 'Weak Bull', 'Neutral', 'Weak Bear', 'Strong Bear'],
+                    gridcolor: '#475569',
+                    zeroline: true,
+                    zerolinecolor: '#94a3b8',
+                    range: [-1.2, 1.2]
+                },
+                legend: { 
+                    x: 0,
+                    y: 1,
+                    bgcolor: 'rgba(30, 41, 59, 0.8)'
+                },
+                hovermode: 'x unified',
+                shapes: [{
+                    type: 'rect',
+                    xref: 'paper',
+                    yref: 'y',
+                    x0: 0,
+                    y0: 0,
+                    x1: 1,
+                    y1: 'max',
+                    fillcolor: 'rgba(248, 113, 113, 0.15)',
+                    layer: 'below',
+                    line: { width: 0 }
+                }, {
+                    type: 'rect',
+                    xref: 'paper',
+                    yref: 'y',
+                    x0: 0,
+                    y0: 'min',
+                    x1: 1,
+                    y1: 0,
+                    fillcolor: 'rgba(74, 222, 128, 0.15)',
+                    layer: 'below',
+                    line: { width: 0 }
+                }]
+            };
+
+            Plotly.newPlot('itmDominanceChart', [trace1, trace2, trace3, trace4], layout, {responsive: true});
         }
 
         function updateTurningPoints(data) {
