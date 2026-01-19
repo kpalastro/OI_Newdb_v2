@@ -81,9 +81,20 @@ def main() -> None:
         backtest_dir = Path('reports') / 'backtests'
         backtest_dir.mkdir(parents=True, exist_ok=True)
         dashboard_file = backtest_dir / f'{args.exchange.upper()}.json'
-        with open(dashboard_file, "w", encoding="utf-8") as handle:
-            json.dump(result.to_dict(), handle, indent=2)
-        logging.warning("Saved backtest report to dashboard location: %s", dashboard_file)
+        try:
+            result_dict = result.to_dict()
+            with open(dashboard_file, "w", encoding="utf-8") as handle:
+                json.dump(result_dict, handle, indent=2)
+            # Verify the file was written correctly
+            file_size = dashboard_file.stat().st_size
+            num_trades_saved = result_dict.get('metrics', {}).get('num_trades', 0)
+            logging.warning("Saved backtest report to dashboard location: %s", dashboard_file)
+            logging.warning("File size: %d bytes, Trades saved: %d, Date range: %s to %s", 
+                          file_size, num_trades_saved, 
+                          result_dict.get('config', {}).get('start'),
+                          result_dict.get('config', {}).get('end'))
+        except Exception as e:
+            logging.error("Failed to save backtest report: %s", e, exc_info=True)
 
 
 if __name__ == "__main__":
