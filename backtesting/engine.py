@@ -166,9 +166,31 @@ class BacktestEngine:
         zero_direction_count = 0
         zero_capital_count = 0
         signal_count = {'BUY': 0, 'SELL': 0, 'HOLD': 0}
+        
+        # Per-date tracking for debugging
+        date_stats = {}  # date -> {signals: {}, holds: 0, low_conf: 0, trades: 0}
 
         try:
             for _, row in frame.iterrows():
+                # Track per-date statistics
+                row_date = row.get('timestamp', '')
+                if isinstance(row_date, str):
+                    try:
+                        date_key = row_date.split(' ')[0]  # Extract date part
+                    except:
+                        date_key = 'unknown'
+                else:
+                    date_key = str(row_date)
+                
+                if date_key not in date_stats:
+                    date_stats[date_key] = {
+                        'signals': {'BUY': 0, 'SELL': 0, 'HOLD': 0},
+                        'holds': 0,
+                        'low_conf': 0,
+                        'zero_dir': 0,
+                        'zero_cap': 0,
+                        'trades': 0
+                    }
                 if len(trades) >= trade_limit:
                     break
 
@@ -195,17 +217,21 @@ class BacktestEngine:
                     signal, confidence, rationale, metadata = self.signal_engine.generate_signal(features)
 
                 signal_count[signal] = signal_count.get(signal, 0) + 1
+                date_stats[date_key]['signals'][signal] = date_stats[date_key]['signals'].get(signal, 0) + 1
 
                 if signal == 'HOLD':
                     hold_count += 1
+                    date_stats[date_key]['holds'] += 1
                     continue
                 if confidence < self.config.min_confidence:
                     low_confidence_count += 1
+                    date_stats[date_key]['low_conf'] += 1
                     continue
 
                 direction = 1 if signal == 'BUY' else -1 if signal == 'SELL' else 0
                 if direction == 0:
                     zero_direction_count += 1
+                    date_stats[date_key]['zero_dir'] += 1
                     continue
 
                 # Risk inputs: fallback defaults if router is used and no metrics available
@@ -226,7 +252,11 @@ class BacktestEngine:
                 capital_allocated = risk.get('capital_allocated', 0.0)
                 if capital_allocated <= 0.0:
                     zero_capital_count += 1
+                    date_stats[date_key]['zero_cap'] += 1
                     continue
+                
+                # Trade was generated
+                date_stats[date_key]['trades'] += 1
 
                 future_return = float(row['future_return'])
                 gross_pnl = direction * future_return * capital_allocated
@@ -286,6 +316,19 @@ class BacktestEngine:
             LOGGER.warning("Filtered out: HOLD=%d, Low confidence (<%.2f)=%d, Zero direction=%d, Zero capital=%d",
                        hold_count, self.config.min_confidence, low_confidence_count, 
                        zero_direction_count, zero_capital_count)
+        
+        # Log per-date statistics for debugging
+        LOGGER.warning("Per-date statistics:")
+        for date_key in sorted(date_stats.keys()):
+            stats = date_stats[date_key]
+            LOGGER.warning(
+                "  %s: Signals(BUY=%d, SELL=%d, HOLD=%d) | "
+                "Filtered(HOLD=%d, LowConf=%d, ZeroDir=%d, ZeroCap=%d) | Trades=%d",
+                date_key,
+                stats['signals'].get('BUY', 0), stats['signals'].get('SELL', 0), stats['signals'].get('HOLD', 0),
+                stats['holds'], stats['low_conf'], stats['zero_dir'], stats['zero_cap'],
+                stats['trades']
+            )
 
         # Run Monte Carlo Simulation
         result = BacktestResult(self.config, trades, metrics, equity_curve, raw_rows=len(frame))
@@ -311,7 +354,17 @@ class BacktestEngine:
             return pd.DataFrame()
 
         if raw is None or raw.empty:
+            LOGGER.warning("No raw data loaded for %s between %s and %s", 
+                          self.config.exchange, self.config.start, self.config.end)
             return pd.DataFrame()
+        
+        # Log data availability by date
+        if 'timestamp' in raw.columns:
+            raw['date'] = pd.to_datetime(raw['timestamp']).dt.date
+            date_counts = raw.groupby('date').size()
+            LOGGER.warning("Data availability by date:")
+            for date_val, count in date_counts.items():
+                LOGGER.warning("  %s: %d rows", date_val, count)
 
         try:
             feature_frame = prepare_training_features(raw, required_columns=REQUIRED_FEATURE_COLUMNS)
