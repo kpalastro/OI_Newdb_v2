@@ -1245,16 +1245,54 @@
             autoRefreshInterval = setInterval(loadData, 60000);
         }
 
+        // Handle window resize for TradingView charts
+        function resizeTradingViewCharts() {
+            if (itmOIChart) {
+                const container = document.getElementById('itmOIDivergenceChart');
+                if (container) {
+                    itmOIChart.applyOptions({ width: container.clientWidth });
+                }
+            }
+            if (itmVolumeChart) {
+                const container = document.getElementById('itmVolumeDivergenceChart');
+                if (container) {
+                    itmVolumeChart.applyOptions({ width: container.clientWidth });
+                }
+            }
+            if (itmDominanceChart) {
+                const container = document.getElementById('itmDominanceChart');
+                if (container) {
+                    itmDominanceChart.applyOptions({ width: container.clientWidth });
+                }
+            }
+        }
+
         // Initialize
         document.addEventListener('DOMContentLoaded', () => {
             loadData();
             startAutoRefresh();
+            
+            // Handle window resize
+            let resizeTimeout;
+            window.addEventListener('resize', () => {
+                clearTimeout(resizeTimeout);
+                resizeTimeout = setTimeout(resizeTradingViewCharts, 250);
+            });
         });
 
         // Cleanup on page unload
         window.addEventListener('beforeunload', () => {
             if (autoRefreshInterval) {
                 clearInterval(autoRefreshInterval);
+            }
+            if (itmOIChart) {
+                itmOIChart.remove();
+            }
+            if (itmVolumeChart) {
+                itmVolumeChart.remove();
+            }
+            if (itmDominanceChart) {
+                itmDominanceChart.remove();
             }
         });
     </script>
