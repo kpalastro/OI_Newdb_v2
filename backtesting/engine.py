@@ -365,6 +365,13 @@ class BacktestEngine:
             LOGGER.warning("Data availability by date:")
             for date_val, count in date_counts.items():
                 LOGGER.warning("  %s: %d rows", date_val, count)
+            
+            # Check for missing dates in the range
+            all_dates = pd.date_range(start=self.config.start, end=self.config.end, freq='D').date
+            missing_dates = [d for d in all_dates if d not in date_counts.index]
+            if missing_dates:
+                LOGGER.warning("Missing data for dates: %s", [str(d) for d in missing_dates])
+                LOGGER.warning("This may explain why no trades are generated for those dates.")
 
         try:
             feature_frame = prepare_training_features(raw, required_columns=REQUIRED_FEATURE_COLUMNS)
