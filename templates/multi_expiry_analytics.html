@@ -1036,7 +1036,7 @@
             });
             
             // Add ITM CE Volume line
-            const ceVolSeries = itmVolumeChart.addLineSeries({
+            const ceVolSeries = itmVolumeChart.addSeries(LightweightCharts.LineSeries, {
                 color: '#60a5fa',
                 lineWidth: 2,
                 title: 'ITM CE Vol Δ% (Volume-weighted)',
@@ -1045,7 +1045,7 @@
             ceVolSeries.setData(chartData.map(d => ({ time: d.time, value: d.ceVolChange })));
             
             // Add ITM PE Volume line
-            const peVolSeries = itmVolumeChart.addLineSeries({
+            const peVolSeries = itmVolumeChart.addSeries(LightweightCharts.LineSeries, {
                 color: '#f87171',
                 lineWidth: 2,
                 title: 'ITM PE Vol Δ% (Volume-weighted)',
@@ -1054,7 +1054,7 @@
             peVolSeries.setData(chartData.map(d => ({ time: d.time, value: d.peVolChange })));
             
             // Add volume dominance line on right scale
-            const volDominanceSeries = itmVolumeChart.addLineSeries({
+            const volDominanceSeries = itmVolumeChart.addSeries(LightweightCharts.LineSeries, {
                 color: '#fb923c',
                 lineWidth: 2,
                 lineStyle: 1, // Dashed
@@ -1065,8 +1065,8 @@
             });
             volDominanceSeries.setData(chartData.map(d => ({ time: d.time, value: d.volDominance })));
             
-            // Add PCRV line on right scale (create separate right scale for PCRV)
-            const pcrvSeries = itmVolumeChart.addLineSeries({
+            // Add PCRV line on right scale
+            const pcrvSeries = itmVolumeChart.addSeries(LightweightCharts.LineSeries, {
                 color: '#a78bfa',
                 lineWidth: 2,
                 lineStyle: 2, // Dotted
@@ -1078,7 +1078,7 @@
             pcrvSeries.setData(chartData.map(d => ({ time: d.time, value: d.pcrv })));
             
             // Add zero line
-            const zeroSeries = itmVolumeChart.addLineSeries({
+            const zeroSeries = itmVolumeChart.addSeries(LightweightCharts.LineSeries, {
                 color: '#94a3b8',
                 lineWidth: 1,
                 lineStyle: 2, // Dotted
