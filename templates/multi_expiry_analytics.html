@@ -935,7 +935,7 @@
             });
             
             // Add ITM CE line
-            const ceSeries = itmOIChart.addLineSeries({
+            const ceSeries = itmOIChart.addSeries(LightweightCharts.LineSeries, {
                 color: '#60a5fa',
                 lineWidth: 2,
                 title: 'ITM CE Δ% (OI-weighted)',
@@ -944,7 +944,7 @@
             ceSeries.setData(chartData.map(d => ({ time: d.time, value: d.ceChange })));
             
             // Add ITM PE line
-            const peSeries = itmOIChart.addLineSeries({
+            const peSeries = itmOIChart.addSeries(LightweightCharts.LineSeries, {
                 color: '#f87171',
                 lineWidth: 2,
                 title: 'ITM PE Δ% (OI-weighted)',
@@ -953,7 +953,7 @@
             peSeries.setData(chartData.map(d => ({ time: d.time, value: d.peChange })));
             
             // Add dominance line on right scale
-            const dominanceSeries = itmOIChart.addLineSeries({
+            const dominanceSeries = itmOIChart.addSeries(LightweightCharts.LineSeries, {
                 color: '#fb923c',
                 lineWidth: 2,
                 lineStyle: 1, // Dashed
@@ -965,7 +965,7 @@
             dominanceSeries.setData(chartData.map(d => ({ time: d.time, value: d.dominance })));
             
             // Add zero line
-            const zeroSeries = itmOIChart.addLineSeries({
+            const zeroSeries = itmOIChart.addSeries(LightweightCharts.LineSeries, {
                 color: '#94a3b8',
                 lineWidth: 1,
                 lineStyle: 2, // Dotted
@@ -1166,7 +1166,7 @@
             });
             
             // Add ITM OI Dominance line
-            const oiDomSeries = itmDominanceChart.addLineSeries({
+            const oiDomSeries = itmDominanceChart.addSeries(LightweightCharts.LineSeries, {
                 color: '#fb923c',
                 lineWidth: 2,
                 title: 'ITM OI Dominance (PE - CE)',
@@ -1175,7 +1175,7 @@
             oiDomSeries.setData(chartData.map(d => ({ time: d.time, value: d.oiDominance })));
             
             // Add ITM Vol Dominance line
-            const volDomSeries = itmDominanceChart.addLineSeries({
+            const volDomSeries = itmDominanceChart.addSeries(LightweightCharts.LineSeries, {
                 color: '#a78bfa',
                 lineWidth: 2,
                 lineStyle: 1, // Dashed
@@ -1185,7 +1185,7 @@
             volDomSeries.setData(chartData.map(d => ({ time: d.time, value: d.volDominance })));
             
             // Add combined signal as histogram bars on right scale
-            const signalSeries = itmDominanceChart.addHistogramSeries({
+            const signalSeries = itmDominanceChart.addSeries(LightweightCharts.HistogramSeries, {
                 color: '#60a5fa',
                 priceFormat: { type: 'price', precision: 1, minMove: 0.1 },
                 priceScaleId: 'right',
@@ -1198,7 +1198,7 @@
             })));
             
             // Add zero line
-            const zeroSeries = itmDominanceChart.addLineSeries({
+            const zeroSeries = itmDominanceChart.addSeries(LightweightCharts.LineSeries, {
                 color: '#94a3b8',
                 lineWidth: 1,
                 lineStyle: 2, // Dotted
