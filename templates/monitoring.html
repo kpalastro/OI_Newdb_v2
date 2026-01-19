@@ -218,6 +218,8 @@
                                     <div class="col-6">
                                         <div class="metric-label">{{ strings.monitoring_card_backtest }}</div>
                                         <div class="metric-value" style="color: #f7fafc;">PnL ₹${netPnL.toFixed(0)} · Sharpe ${sharpe.toFixed(2)}</div>
+                                        ${numTrades > 0 ? `<div class="metric-subtext" style="font-size: 0.75rem; color: #a0aec0; margin-top: 2px;">${numTrades} trades · ${dateRange}</div>` : ''}
+                                        ${generatedAt ? `<div class="metric-subtext" style="font-size: 0.7rem; color: #718096; margin-top: 1px;">Updated: ${new Date(generatedAt).toLocaleString()}</div>` : ''}
                                     </div>
                                     <div class="col-6">
                                         <div class="metric-label">{{ strings.monitoring_card_online }}</div>
