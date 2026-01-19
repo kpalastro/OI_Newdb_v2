@@ -378,6 +378,57 @@ def initialize_database():
                     created_at TIMESTAMP DEFAULT NOW(),
                     PRIMARY KEY (timestamp, exchange, base_strike)
                 )
+                ''',
+                '''
+                CREATE TABLE IF NOT EXISTS model_versions (
+                    id SERIAL PRIMARY KEY,
+                    version VARCHAR(50) NOT NULL,
+                    exchange TEXT NOT NULL,
+                    model_type TEXT NOT NULL,
+                    model_path TEXT NOT NULL,
+                    artifact_paths JSONB,
+                    model_hash TEXT,
+                    training_date TIMESTAMP NOT NULL,
+                    training_data_start_date DATE,
+                    training_data_end_date DATE,
+                    training_samples INTEGER,
+                    hyperparameters JSONB,
+                    validation_metrics JSONB,
+                    test_metrics JSONB,
+                    cv_metrics JSONB,
+                    status TEXT NOT NULL DEFAULT 'candidate',
+                    is_production BOOLEAN DEFAULT FALSE,
+                    promoted_at TIMESTAMP,
+                    deprecated_at TIMESTAMP,
+                    previous_version_id INTEGER REFERENCES model_versions(id),
+                    rollback_reason TEXT,
+                    code_commit_hash TEXT,
+                    training_data_hash TEXT,
+                    created_by TEXT,
+                    notes TEXT,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(version, exchange, model_type)
+                )
+                ''',
+                '''
+                CREATE TABLE IF NOT EXISTS model_performance_log (
+                    id SERIAL PRIMARY KEY,
+                    model_version_id INTEGER REFERENCES model_versions(id),
+                    exchange TEXT NOT NULL,
+                    evaluation_date DATE NOT NULL,
+                    signals_generated INTEGER,
+                    correct_predictions INTEGER,
+                    incorrect_predictions INTEGER,
+                    win_rate DOUBLE PRECISION,
+                    avg_return DOUBLE PRECISION,
+                    sharpe_ratio DOUBLE PRECISION,
+                    max_drawdown DOUBLE PRECISION,
+                    avg_confidence DOUBLE PRECISION,
+                    prediction_distribution JSONB,
+                    regime_performance JSONB,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(model_version_id, evaluation_date)
+                )
                 '''
             ]
 
@@ -419,7 +470,12 @@ def initialize_database():
             'CREATE INDEX IF NOT EXISTS idx_multi_res_bars_resolution_time ON multi_resolution_bars(exchange, resolution, timestamp DESC)',
             'CREATE INDEX IF NOT EXISTS idx_multi_res_bars_token_time ON multi_resolution_bars(token, timestamp DESC)',
             'CREATE INDEX IF NOT EXISTS idx_multi_expiry_ts_exchange ON nse_multi_expiry_minute_data(timestamp, exchange)',
-            'CREATE INDEX IF NOT EXISTS idx_multi_expiry_exchange_strike ON nse_multi_expiry_minute_data(exchange, base_strike, timestamp DESC)'
+            'CREATE INDEX IF NOT EXISTS idx_multi_expiry_exchange_strike ON nse_multi_expiry_minute_data(exchange, base_strike, timestamp DESC)',
+            'CREATE INDEX IF NOT EXISTS idx_model_versions_exchange_type ON model_versions(exchange, model_type)',
+            'CREATE INDEX IF NOT EXISTS idx_model_versions_status ON model_versions(status)',
+            'CREATE INDEX IF NOT EXISTS idx_model_versions_production ON model_versions(is_production) WHERE is_production = TRUE',
+            'CREATE INDEX IF NOT EXISTS idx_model_performance_version ON model_performance_log(model_version_id, evaluation_date DESC)',
+            'CREATE INDEX IF NOT EXISTS idx_model_performance_exchange ON model_performance_log(exchange, evaluation_date DESC)'
         ]
         for idx in indexes:
             try:
@@ -1014,9 +1070,12 @@ def load_historical_data_for_ml(exchange: str, start_date: date, end_date: date)
         try:
             conn = get_db_connection()
             ph = _get_placeholder()
+            # Use DATE() function to properly compare dates, ensuring we include the full end_date
             query = f"""
                 SELECT * FROM ml_features
-                WHERE exchange = {ph} AND timestamp >= {ph} AND timestamp <= {ph}
+                WHERE exchange = {ph} 
+                  AND DATE(timestamp) >= {ph}::date 
+                  AND DATE(timestamp) <= {ph}::date
                 ORDER BY timestamp ASC
             """
             # psycopg2 prefers standard SQL params, pandas read_sql handles execution
