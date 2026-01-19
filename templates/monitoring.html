@@ -185,6 +185,10 @@
                 const bestFamily = summarizeBestFamily(auto.best_by_family);
                 const netPnL = backtest.metrics ? (backtest.metrics.net_total_pnl || backtest.metrics.total_pnl || 0) : 0;
                 const sharpe = backtest.metrics ? (backtest.metrics.sharpe_ratio || backtest.metrics.sharpe || 0) : 0;
+                const numTrades = backtest.metrics ? (backtest.metrics.num_trades || 0) : 0;
+                const generatedAt = backtest.generated_at || null;
+                const dateRange = backtest.config ? 
+                    `${backtest.config.start || 'N/A'} to ${backtest.config.end || 'N/A'}` : 'N/A';
                 const rollingAcc = online.rolling_accuracy !== undefined ? 
                                  (typeof online.rolling_accuracy === 'number' ? (online.rolling_accuracy * 100).toFixed(1) : online.rolling_accuracy) : 
                                  (online.accuracy !== undefined ? 

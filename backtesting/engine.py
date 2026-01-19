@@ -109,6 +109,7 @@ class BacktestResult:
     monte_carlo_report: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
+        from datetime import datetime
         return {
             "config": {
                 **{k: v for k, v in asdict(self.config).items() if k not in {"start", "end"}},
@@ -119,7 +120,9 @@ class BacktestResult:
             "equity_curve": self.equity_curve,
             "trades": [trade.to_dict() for trade in self.trades],
             "raw_rows": self.raw_rows,
-            "monte_carlo_report": self.monte_carlo_report
+            "monte_carlo_report": self.monte_carlo_report,
+            "generated_at": datetime.now().isoformat(),
+            "num_trades_generated": len(self.trades)
         }
 
 
