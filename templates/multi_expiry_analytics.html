@@ -960,6 +960,7 @@
                 title: 'ITM PE Dominance (PE - CE)',
                 priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
                 priceScaleId: 'right',
+                axisLabelVisible: true,
             });
             dominanceSeries.setData(chartData.map(d => ({ time: d.time, value: d.dominance })));
             
@@ -1060,10 +1061,11 @@
                 title: 'ITM Vol Dominance (PE - CE)',
                 priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
                 priceScaleId: 'right',
+                axisLabelVisible: true,
             });
             volDominanceSeries.setData(chartData.map(d => ({ time: d.time, value: d.volDominance })));
             
-            // Add PCRV line on right scale
+            // Add PCRV line on right scale (create separate right scale for PCRV)
             const pcrvSeries = itmVolumeChart.addLineSeries({
                 color: '#a78bfa',
                 lineWidth: 2,
@@ -1071,6 +1073,7 @@
                 title: 'PCRV (Put/Call Volume Ratio)',
                 priceFormat: { type: 'price', precision: 3, minMove: 0.001 },
                 priceScaleId: 'right',
+                axisLabelVisible: true,
             });
             pcrvSeries.setData(chartData.map(d => ({ time: d.time, value: d.pcrv })));
             
@@ -1186,6 +1189,7 @@
                 color: '#60a5fa',
                 priceFormat: { type: 'price', precision: 1, minMove: 0.1 },
                 priceScaleId: 'right',
+                axisLabelVisible: true,
             });
             signalSeries.setData(chartData.map(d => ({
                 time: d.time,
