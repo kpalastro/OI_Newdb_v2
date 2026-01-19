@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Multi-Expiry Analytics Dashboard</title>
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
     <style>
         * {
             margin: 0;
@@ -872,6 +873,11 @@
             Plotly.newPlot('predictionChart', [trace], layout, {responsive: true});
         }
 
+        // Store chart instances for cleanup
+        let itmOIChart = null;
+        let itmVolumeChart = null;
+        let itmDominanceChart = null;
+
         function plotITMOIDivergence(data) {
             // Check if data is available for this chart
             const hasData = data.some(d => 
@@ -886,110 +892,88 @@
             }
             chartContainer.style.display = 'block';
             
-            const timestamps = data.map(d => d.timestamp);
-            const itmCeChange = data.map(d => d.itm_oi_ce_pct_change_3m_wavg || 0);
-            const itmPeChange = data.map(d => d.itm_oi_pe_pct_change_3m_wavg || 0);
-            const itmDominance = data.map(d => (d.itm_oi_pe_pct_change_3m_wavg || 0) - (d.itm_oi_ce_pct_change_3m_wavg || 0));
-
-            const trace1 = {
-                x: timestamps,
-                y: itmCeChange,
-                name: 'ITM CE Δ% (OI-weighted)',
-                type: 'scatter',
-                mode: 'lines+markers',
-                line: { color: '#60a5fa', width: 2 },
-                marker: { size: 4 },
-                yaxis: 'y'
-            };
-
-            const trace2 = {
-                x: timestamps,
-                y: itmPeChange,
-                name: 'ITM PE Δ% (OI-weighted)',
-                type: 'scatter',
-                mode: 'lines+markers',
-                line: { color: '#f87171', width: 2 },
-                marker: { size: 4 },
-                yaxis: 'y'
-            };
-
-            const trace3 = {
-                x: timestamps,
-                y: itmDominance,
-                name: 'ITM PE Dominance (PE - CE)',
-                type: 'scatter',
-                mode: 'lines',
-                line: { color: '#fb923c', width: 2, dash: 'dash' },
-                yaxis: 'y2'
-            };
-
-            const trace4 = {
-                x: timestamps,
-                y: Array(timestamps.length).fill(0),
-                name: 'Zero Line',
-                type: 'scatter',
-                mode: 'lines',
-                line: { color: '#94a3b8', width: 1, dash: 'dot' },
-                yaxis: 'y'
-            };
-
-            const layout = {
-                title: { text: '', font: { color: '#e2e8f0' } },
-                plot_bgcolor: 'rgba(0,0,0,0)',
-                paper_bgcolor: 'rgba(0,0,0,0)',
-                font: { color: '#e2e8f0' },
-                xaxis: { 
-                    title: 'Time',
-                    gridcolor: '#475569',
-                    zeroline: false
+            const container = document.getElementById('itmOIDivergenceChart');
+            container.innerHTML = ''; // Clear previous chart
+            
+            // Destroy existing chart if any
+            if (itmOIChart) {
+                itmOIChart.remove();
+            }
+            
+            // Prepare data
+            const chartData = data.map(d => ({
+                time: Math.floor(new Date(d.timestamp).getTime() / 1000),
+                ceChange: d.itm_oi_ce_pct_change_3m_wavg || 0,
+                peChange: d.itm_oi_pe_pct_change_3m_wavg || 0,
+                dominance: (d.itm_oi_pe_pct_change_3m_wavg || 0) - (d.itm_oi_ce_pct_change_3m_wavg || 0)
+            })).sort((a, b) => a.time - b.time);
+            
+            // Create TradingView chart
+            itmOIChart = LightweightCharts.createChart(container, {
+                layout: {
+                    background: { type: 'solid', color: '#1e293b' },
+                    textColor: '#e2e8f0',
                 },
-                yaxis: {
-                    title: 'ITM Δ% (OI-weighted)',
-                    side: 'left',
-                    gridcolor: '#475569',
-                    zeroline: true,
-                    zerolinecolor: '#94a3b8'
+                grid: {
+                    vertLines: { color: '#475569' },
+                    horzLines: { color: '#475569' },
                 },
-                yaxis2: {
-                    title: 'Dominance Signal',
-                    side: 'right',
-                    overlaying: 'y',
-                    gridcolor: '#475569',
-                    zeroline: true,
-                    zerolinecolor: '#94a3b8'
+                width: container.clientWidth,
+                height: 650,
+                timeScale: {
+                    timeVisible: true,
+                    secondsVisible: false,
                 },
-                legend: { 
-                    x: 0,
-                    y: 1,
-                    bgcolor: 'rgba(30, 41, 59, 0.8)'
+                rightPriceScale: {
+                    visible: true,
+                    borderColor: '#475569',
                 },
-                hovermode: 'x unified',
-                shapes: [{
-                    type: 'rect',
-                    xref: 'paper',
-                    yref: 'y2',
-                    x0: 0,
-                    y0: 0,
-                    x1: 1,
-                    y1: 'max',
-                    fillcolor: 'rgba(248, 113, 113, 0.1)',
-                    layer: 'below',
-                    line: { width: 0 }
-                }, {
-                    type: 'rect',
-                    xref: 'paper',
-                    yref: 'y2',
-                    x0: 0,
-                    y0: 'min',
-                    x1: 1,
-                    y1: 0,
-                    fillcolor: 'rgba(96, 165, 250, 0.1)',
-                    layer: 'below',
-                    line: { width: 0 }
-                }]
-            };
-
-            Plotly.newPlot('itmOIDivergenceChart', [trace1, trace2, trace3, trace4], layout, {responsive: true});
+                leftPriceScale: {
+                    visible: true,
+                    borderColor: '#475569',
+                },
+            });
+            
+            // Add ITM CE line
+            const ceSeries = itmOIChart.addLineSeries({
+                color: '#60a5fa',
+                lineWidth: 2,
+                title: 'ITM CE Δ% (OI-weighted)',
+                priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+            });
+            ceSeries.setData(chartData.map(d => ({ time: d.time, value: d.ceChange })));
+            
+            // Add ITM PE line
+            const peSeries = itmOIChart.addLineSeries({
+                color: '#f87171',
+                lineWidth: 2,
+                title: 'ITM PE Δ% (OI-weighted)',
+                priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+            });
+            peSeries.setData(chartData.map(d => ({ time: d.time, value: d.peChange })));
+            
+            // Add dominance line on right scale
+            const dominanceSeries = itmOIChart.addLineSeries({
+                color: '#fb923c',
+                lineWidth: 2,
+                lineStyle: 1, // Dashed
+                title: 'ITM PE Dominance (PE - CE)',
+                priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+                priceScaleId: 'right',
+            });
+            dominanceSeries.setData(chartData.map(d => ({ time: d.time, value: d.dominance })));
+            
+            // Add zero line
+            const zeroSeries = itmOIChart.addLineSeries({
+                color: '#94a3b8',
+                lineWidth: 1,
+                lineStyle: 2, // Dotted
+                title: 'Zero Line',
+                priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+            });
+            zeroSeries.setData(chartData.map(d => ({ time: d.time, value: 0 })));
+            
+            itmOIChart.timeScale().fitContent();
         }
 
         function plotITMVolumeDivergence(data) {
@@ -1007,130 +991,100 @@
             }
             chartContainer.style.display = 'block';
             
-            const timestamps = data.map(d => d.timestamp);
-            const itmCeVolChange = data.map(d => d.itm_volume_ce_pct_change_3m_wavg || 0);
-            const itmPeVolChange = data.map(d => d.itm_volume_pe_pct_change_3m_wavg || 0);
-            const itmVolDominance = data.map(d => (d.itm_volume_pe_pct_change_3m_wavg || 0) - (d.itm_volume_ce_pct_change_3m_wavg || 0));
-            const pcrv = data.map(d => d.pcr_total_volume || 0);
-
-            const trace1 = {
-                x: timestamps,
-                y: itmCeVolChange,
-                name: 'ITM CE Vol Δ% (Volume-weighted)',
-                type: 'scatter',
-                mode: 'lines+markers',
-                line: { color: '#60a5fa', width: 2 },
-                marker: { size: 4 },
-                yaxis: 'y'
-            };
-
-            const trace2 = {
-                x: timestamps,
-                y: itmPeVolChange,
-                name: 'ITM PE Vol Δ% (Volume-weighted)',
-                type: 'scatter',
-                mode: 'lines+markers',
-                line: { color: '#f87171', width: 2 },
-                marker: { size: 4 },
-                yaxis: 'y'
-            };
-
-            const trace3 = {
-                x: timestamps,
-                y: itmVolDominance,
-                name: 'ITM Vol Dominance (PE - CE)',
-                type: 'scatter',
-                mode: 'lines',
-                line: { color: '#fb923c', width: 2, dash: 'dash' },
-                yaxis: 'y2'
-            };
-
-            const trace4 = {
-                x: timestamps,
-                y: pcrv,
-                name: 'PCRV (Put/Call Volume Ratio)',
-                type: 'scatter',
-                mode: 'lines',
-                line: { color: '#a78bfa', width: 2, dash: 'dot' },
-                yaxis: 'y3'
-            };
-
-            const trace5 = {
-                x: timestamps,
-                y: Array(timestamps.length).fill(0),
-                name: 'Zero Line',
-                type: 'scatter',
-                mode: 'lines',
-                line: { color: '#94a3b8', width: 1, dash: 'dot' },
-                yaxis: 'y'
-            };
-
-            const layout = {
-                title: { text: '', font: { color: '#e2e8f0' } },
-                plot_bgcolor: 'rgba(0,0,0,0)',
-                paper_bgcolor: 'rgba(0,0,0,0)',
-                font: { color: '#e2e8f0' },
-                xaxis: { 
-                    title: 'Time',
-                    gridcolor: '#475569',
-                    zeroline: false
+            const container = document.getElementById('itmVolumeDivergenceChart');
+            container.innerHTML = ''; // Clear previous chart
+            
+            // Destroy existing chart if any
+            if (itmVolumeChart) {
+                itmVolumeChart.remove();
+            }
+            
+            // Prepare data
+            const chartData = data.map(d => ({
+                time: Math.floor(new Date(d.timestamp).getTime() / 1000),
+                ceVolChange: d.itm_volume_ce_pct_change_3m_wavg || 0,
+                peVolChange: d.itm_volume_pe_pct_change_3m_wavg || 0,
+                volDominance: (d.itm_volume_pe_pct_change_3m_wavg || 0) - (d.itm_volume_ce_pct_change_3m_wavg || 0),
+                pcrv: d.pcr_total_volume || 0
+            })).sort((a, b) => a.time - b.time);
+            
+            // Create TradingView chart
+            itmVolumeChart = LightweightCharts.createChart(container, {
+                layout: {
+                    background: { type: 'solid', color: '#1e293b' },
+                    textColor: '#e2e8f0',
                 },
-                yaxis: {
-                    title: 'ITM Vol Δ%',
-                    side: 'left',
-                    gridcolor: '#475569',
-                    zeroline: true,
-                    zerolinecolor: '#94a3b8'
+                grid: {
+                    vertLines: { color: '#475569' },
+                    horzLines: { color: '#475569' },
                 },
-                yaxis2: {
-                    title: 'Dominance',
-                    side: 'right',
-                    overlaying: 'y',
-                    gridcolor: '#475569',
-                    zeroline: true,
-                    zerolinecolor: '#94a3b8',
-                    position: 0.95
+                width: container.clientWidth,
+                height: 650,
+                timeScale: {
+                    timeVisible: true,
+                    secondsVisible: false,
                 },
-                yaxis3: {
-                    title: 'PCRV',
-                    side: 'right',
-                    overlaying: 'y',
-                    gridcolor: '#475569',
-                    zeroline: false,
-                    position: 1.0
+                rightPriceScale: {
+                    visible: true,
+                    borderColor: '#475569',
                 },
-                legend: { 
-                    x: 0,
-                    y: 1,
-                    bgcolor: 'rgba(30, 41, 59, 0.8)'
+                leftPriceScale: {
+                    visible: true,
+                    borderColor: '#475569',
                 },
-                hovermode: 'x unified',
-                shapes: [{
-                    type: 'rect',
-                    xref: 'paper',
-                    yref: 'y2',
-                    x0: 0,
-                    y0: 0,
-                    x1: 1,
-                    y1: 'max',
-                    fillcolor: 'rgba(248, 113, 113, 0.1)',
-                    layer: 'below',
-                    line: { width: 0 }
-                }, {
-                    type: 'rect',
-                    xref: 'paper',
-                    yref: 'y2',
-                    x0: 0,
-                    y0: 'min',
-                    x1: 1,
-                    y1: 0,
-                    fillcolor: 'rgba(96, 165, 250, 0.1)',
-                    layer: 'below',
-                    line: { width: 0 }
-                }]
-            };
-
-            Plotly.newPlot('itmVolumeDivergenceChart', [trace1, trace2, trace3, trace4, trace5], layout, {responsive: true});
+            });
+            
+            // Add ITM CE Volume line
+            const ceVolSeries = itmVolumeChart.addLineSeries({
+                color: '#60a5fa',
+                lineWidth: 2,
+                title: 'ITM CE Vol Δ% (Volume-weighted)',
+                priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+            });
+            ceVolSeries.setData(chartData.map(d => ({ time: d.time, value: d.ceVolChange })));
+            
+            // Add ITM PE Volume line
+            const peVolSeries = itmVolumeChart.addLineSeries({
+                color: '#f87171',
+                lineWidth: 2,
+                title: 'ITM PE Vol Δ% (Volume-weighted)',
+                priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+            });
+            peVolSeries.setData(chartData.map(d => ({ time: d.time, value: d.peVolChange })));
+            
+            // Add volume dominance line on right scale
+            const volDominanceSeries = itmVolumeChart.addLineSeries({
+                color: '#fb923c',
+                lineWidth: 2,
+                lineStyle: 1, // Dashed
+                title: 'ITM Vol Dominance (PE - CE)',
+                priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+                priceScaleId: 'right',
+            });
+            volDominanceSeries.setData(chartData.map(d => ({ time: d.time, value: d.volDominance })));
+            
+            // Add PCRV line on right scale
+            const pcrvSeries = itmVolumeChart.addLineSeries({
+                color: '#a78bfa',
+                lineWidth: 2,
+                lineStyle: 2, // Dotted
+                title: 'PCRV (Put/Call Volume Ratio)',
+                priceFormat: { type: 'price', precision: 3, minMove: 0.001 },
+                priceScaleId: 'right',
+            });
+            pcrvSeries.setData(chartData.map(d => ({ time: d.time, value: d.pcrv })));
+            
+            // Add zero line
+            const zeroSeries = itmVolumeChart.addLineSeries({
+                color: '#94a3b8',
+                lineWidth: 1,
+                lineStyle: 2, // Dotted
+                title: 'Zero Line',
+                priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+            });
+            zeroSeries.setData(chartData.map(d => ({ time: d.time, value: 0 })));
+            
+            itmVolumeChart.timeScale().fitContent();
         }
 
         function plotITMDominance(data) {
@@ -1149,147 +1103,107 @@
             }
             chartContainer.style.display = 'block';
             
-            const timestamps = data.map(d => d.timestamp);
+            const container = document.getElementById('itmDominanceChart');
+            container.innerHTML = ''; // Clear previous chart
             
-            // Calculate ITM Dominance signals
-            const itmOIDominance = data.map(d => {
-                const ce = d.itm_oi_ce_pct_change_3m_wavg || 0;
-                const pe = d.itm_oi_pe_pct_change_3m_wavg || 0;
-                return pe - ce; // Positive = Bearish, Negative = Bullish
-            });
+            // Destroy existing chart if any
+            if (itmDominanceChart) {
+                itmDominanceChart.remove();
+            }
             
-            const itmVolDominance = data.map(d => {
-                const ce = d.itm_volume_ce_pct_change_3m_wavg || 0;
-                const pe = d.itm_volume_pe_pct_change_3m_wavg || 0;
-                return pe - ce;
-            });
-            
-            // Create categorical signal: 1 = Bearish (PE > CE), -1 = Bullish (CE > PE), 0 = Neutral
-            const dominanceSignal = data.map(d => {
-                const oiDom = (d.itm_oi_pe_pct_change_3m_wavg || 0) - (d.itm_oi_ce_pct_change_3m_wavg || 0);
-                const volDom = (d.itm_volume_pe_pct_change_3m_wavg || 0) - (d.itm_volume_ce_pct_change_3m_wavg || 0);
-                const threshold = 0.5; // Minimum difference to signal
+            // Prepare data
+            const chartData = data.map(d => {
+                const ceOI = d.itm_oi_ce_pct_change_3m_wavg || 0;
+                const peOI = d.itm_oi_pe_pct_change_3m_wavg || 0;
+                const ceVol = d.itm_volume_ce_pct_change_3m_wavg || 0;
+                const peVol = d.itm_volume_pe_pct_change_3m_wavg || 0;
                 
-                if (oiDom > threshold && volDom > threshold) return 1; // Strong Bearish
-                if (oiDom < -threshold && volDom < -threshold) return -1; // Strong Bullish
-                if (oiDom > threshold || volDom > threshold) return 0.5; // Weak Bearish
-                if (oiDom < -threshold || volDom < -threshold) return -0.5; // Weak Bullish
-                return 0; // Neutral
+                const oiDom = peOI - ceOI;
+                const volDom = peVol - ceVol;
+                
+                const threshold = 0.5;
+                let signal = 0;
+                if (oiDom > threshold && volDom > threshold) signal = 1; // Strong Bearish
+                else if (oiDom < -threshold && volDom < -threshold) signal = -1; // Strong Bullish
+                else if (oiDom > threshold || volDom > threshold) signal = 0.5; // Weak Bearish
+                else if (oiDom < -threshold || volDom < -threshold) signal = -0.5; // Weak Bullish
+                
+                return {
+                    time: Math.floor(new Date(d.timestamp).getTime() / 1000),
+                    oiDominance: oiDom,
+                    volDominance: volDom,
+                    signal: signal
+                };
+            }).sort((a, b) => a.time - b.time);
+            
+            // Create TradingView chart
+            itmDominanceChart = LightweightCharts.createChart(container, {
+                layout: {
+                    background: { type: 'solid', color: '#1e293b' },
+                    textColor: '#e2e8f0',
+                },
+                grid: {
+                    vertLines: { color: '#475569' },
+                    horzLines: { color: '#475569' },
+                },
+                width: container.clientWidth,
+                height: 650,
+                timeScale: {
+                    timeVisible: true,
+                    secondsVisible: false,
+                },
+                rightPriceScale: {
+                    visible: true,
+                    borderColor: '#475569',
+                },
+                leftPriceScale: {
+                    visible: true,
+                    borderColor: '#475569',
+                },
             });
-
-            const trace1 = {
-                x: timestamps,
-                y: itmOIDominance,
-                name: 'ITM OI Dominance (PE - CE)',
-                type: 'scatter',
-                mode: 'lines+markers',
-                line: { color: '#fb923c', width: 2 },
-                marker: { size: 4 },
-                yaxis: 'y'
-            };
-
-            const trace2 = {
-                x: timestamps,
-                y: itmVolDominance,
-                name: 'ITM Vol Dominance (PE - CE)',
-                type: 'scatter',
-                mode: 'lines',
-                line: { color: '#a78bfa', width: 2, dash: 'dash' },
-                yaxis: 'y'
-            };
-
-            const trace3 = {
-                x: timestamps,
-                y: dominanceSignal,
-                name: 'Combined Signal',
-                type: 'scatter',
-                mode: 'lines+markers',
-                line: { 
-                    color: '#60a5fa',
-                    width: 3,
-                    shape: 'hv'
-                },
-                marker: { 
-                    size: 8,
-                    color: dominanceSignal.map(s => {
-                        if (s > 0) return '#f87171'; // Bearish - Red
-                        if (s < 0) return '#4ade80'; // Bullish - Green
-                        return '#94a3b8'; // Neutral - Grey
-                    })
-                },
-                yaxis: 'y2'
-            };
-
-            const trace4 = {
-                x: timestamps,
-                y: Array(timestamps.length).fill(0),
-                name: 'Zero Line',
-                type: 'scatter',
-                mode: 'lines',
-                line: { color: '#94a3b8', width: 1, dash: 'dot' },
-                yaxis: 'y'
-            };
-
-            const layout = {
-                title: { text: '', font: { color: '#e2e8f0' } },
-                plot_bgcolor: 'rgba(0,0,0,0)',
-                paper_bgcolor: 'rgba(0,0,0,0)',
-                font: { color: '#e2e8f0' },
-                xaxis: { 
-                    title: 'Time',
-                    gridcolor: '#475569',
-                    zeroline: false
-                },
-                yaxis: {
-                    title: 'Dominance Value',
-                    side: 'left',
-                    gridcolor: '#475569',
-                    zeroline: true,
-                    zerolinecolor: '#94a3b8'
-                },
-                yaxis2: {
-                    title: 'Signal',
-                    side: 'right',
-                    overlaying: 'y',
-                    tickvals: [-1, -0.5, 0, 0.5, 1],
-                    ticktext: ['Strong Bull', 'Weak Bull', 'Neutral', 'Weak Bear', 'Strong Bear'],
-                    gridcolor: '#475569',
-                    zeroline: true,
-                    zerolinecolor: '#94a3b8',
-                    range: [-1.2, 1.2]
-                },
-                legend: { 
-                    x: 0,
-                    y: 1,
-                    bgcolor: 'rgba(30, 41, 59, 0.8)'
-                },
-                hovermode: 'x unified',
-                shapes: [{
-                    type: 'rect',
-                    xref: 'paper',
-                    yref: 'y',
-                    x0: 0,
-                    y0: 0,
-                    x1: 1,
-                    y1: 'max',
-                    fillcolor: 'rgba(248, 113, 113, 0.15)',
-                    layer: 'below',
-                    line: { width: 0 }
-                }, {
-                    type: 'rect',
-                    xref: 'paper',
-                    yref: 'y',
-                    x0: 0,
-                    y0: 'min',
-                    x1: 1,
-                    y1: 0,
-                    fillcolor: 'rgba(74, 222, 128, 0.15)',
-                    layer: 'below',
-                    line: { width: 0 }
-                }]
-            };
-
-            Plotly.newPlot('itmDominanceChart', [trace1, trace2, trace3, trace4], layout, {responsive: true});
+            
+            // Add ITM OI Dominance line
+            const oiDomSeries = itmDominanceChart.addLineSeries({
+                color: '#fb923c',
+                lineWidth: 2,
+                title: 'ITM OI Dominance (PE - CE)',
+                priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+            });
+            oiDomSeries.setData(chartData.map(d => ({ time: d.time, value: d.oiDominance })));
+            
+            // Add ITM Vol Dominance line
+            const volDomSeries = itmDominanceChart.addLineSeries({
+                color: '#a78bfa',
+                lineWidth: 2,
+                lineStyle: 1, // Dashed
+                title: 'ITM Vol Dominance (PE - CE)',
+                priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+            });
+            volDomSeries.setData(chartData.map(d => ({ time: d.time, value: d.volDominance })));
+            
+            // Add combined signal as histogram bars on right scale
+            const signalSeries = itmDominanceChart.addHistogramSeries({
+                color: '#60a5fa',
+                priceFormat: { type: 'price', precision: 1, minMove: 0.1 },
+                priceScaleId: 'right',
+            });
+            signalSeries.setData(chartData.map(d => ({
+                time: d.time,
+                value: d.signal,
+                color: d.signal > 0 ? '#f87171' : d.signal < 0 ? '#4ade80' : '#94a3b8'
+            })));
+            
+            // Add zero line
+            const zeroSeries = itmDominanceChart.addLineSeries({
+                color: '#94a3b8',
+                lineWidth: 1,
+                lineStyle: 2, // Dotted
+                title: 'Zero Line',
+                priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+            });
+            zeroSeries.setData(chartData.map(d => ({ time: d.time, value: 0 })));
+            
+            itmDominanceChart.timeScale().fitContent();
         }
 
         function updateTurningPoints(data) {
