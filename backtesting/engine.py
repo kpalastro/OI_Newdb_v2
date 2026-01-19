@@ -371,6 +371,14 @@ class BacktestEngine:
             missing_dates = [d for d in all_dates if d not in date_counts.index]
             if missing_dates:
                 LOGGER.warning("Missing data for dates: %s", [str(d) for d in missing_dates])
+                LOGGER.warning("This explains why no trades are generated for those dates.")
+                LOGGER.warning("Check if data collection is running or if these are market holidays.")
+            
+            # Check for missing dates in the range
+            all_dates = pd.date_range(start=self.config.start, end=self.config.end, freq='D').date
+            missing_dates = [d for d in all_dates if d not in date_counts.index]
+            if missing_dates:
+                LOGGER.warning("Missing data for dates: %s", [str(d) for d in missing_dates])
                 LOGGER.warning("This may explain why no trades are generated for those dates.")
 
         try:
