@@ -84,6 +84,47 @@ DEFAULT_MODEL_PARAMS: Dict[str, object] = {
     'min_split_gain': 0.0,  # Allow splits even with minimal gain
 }
 
+def _log_feature_importance(
+    model: lgb.LGBMClassifier,
+    feature_names: List[str],
+    context: str,
+    top_n: int = 20,
+    save_path: Optional[Path] = None,
+) -> None:
+    """
+    Helper to log and optionally persist feature importances.
+    """
+    try:
+        importances = model.feature_importances_
+    except AttributeError:
+        logging.warning(f"[{context}] Model does not expose feature_importances_")
+        return
+
+    if len(importances) != len(feature_names):
+        logging.warning(
+            f"[{context}] Skipping importance log: length mismatch "
+            f"({len(importances)} importances vs {len(feature_names)} features)"
+        )
+        return
+
+    fi = (
+        pd.DataFrame({"feature": feature_names, "importance": importances})
+        .sort_values("importance", ascending=False)
+        .reset_index(drop=True)
+    )
+    logging.info(
+        f"[{context}] Top {min(top_n, len(fi))} features by importance:\n"
+        f"{fi.head(top_n).to_string(index=False)}"
+    )
+
+    if save_path:
+        try:
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            fi.to_json(save_path, orient="records", lines=False, indent=2)
+            logging.info(f"[{context}] Saved feature importances to {save_path}")
+        except Exception as exc:  # pragma: no cover - logging path
+            logging.warning(f"[{context}] Failed to save feature importances: {exc}")
+
 class RegimeHMMTransformer(BaseEstimator, TransformerMixin):
     """
     Custom Transformer to ensure HMM is fit ONLY on training data
@@ -386,6 +427,14 @@ def train_regime_aware_model(
         lgb_selector = lgb.LGBMClassifier(n_estimators=50, random_state=42, verbosity=-1)  # Reduced for speed
         lgb_selector.fit(X_train_feats, y_train)
         print(f"DEBUG: Fold {fold+1}: Feature selector training complete.")
+
+        # Log selector feature importances before selection (includes regime column)
+        _log_feature_importance(
+            lgb_selector,
+            list(X_train_feats.columns),
+            context=f"CV Fold {fold+1} - Selector",
+            top_n=25,
+        )
         selector = SelectFromModel(lgb_selector, threshold='median', prefit=True)
         
         X_train_sel = selector.transform(X_train_feats)
@@ -665,6 +714,17 @@ def final_training_run(exchange: str, df: pd.DataFrame, feature_cols: List[str])
     base_model = lgb.LGBMClassifier(n_estimators=50, random_state=42, verbosity=-1)  # Reduced for speed
     base_model.fit(X_full, y_full)
     print("DEBUG: Final training - Base model training complete.")
+
+    # Log and persist global feature importances prior to selector thresholding
+    model_dir = Path('models') / exchange
+    feature_importance_path = model_dir / 'feature_importance.json'
+    _log_feature_importance(
+        base_model,
+        list(X_full.columns),
+        context="Final Training - Base Selector",
+        top_n=40,
+        save_path=feature_importance_path,
+    )
     selector = SelectFromModel(base_model, threshold='median', prefit=True)
     
     X_full_sel = selector.transform(X_full)
