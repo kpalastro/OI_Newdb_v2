@@ -3650,9 +3650,9 @@ def _select_auto_trade_contract(
     Select a single option contract for auto trading based on exchange-specific strategy.
     
     Strategy:
-    - NSE: Select ATM option from Weekly expiry
-      - BUY signal → Buy ATM CALL from weekly expiry
-      - SELL signal → Buy ATM PUT from weekly expiry
+    - NSE: Select Deep ITM option (2 strikes from ATM) from weekly expiry
+      - BUY signal → Buy Deep ITM CALL (2 strikes ITM) from weekly expiry
+      - SELL signal → Buy Deep ITM PUT (2 strikes ITM) from weekly expiry
     - BANKNIFTY_MONTHLY, NIFTY_MONTHLY: Select ATM option from Monthly expiry
       - BUY signal → Buy ATM CALL from monthly expiry
       - SELL signal → Buy ATM PUT from monthly expiry
@@ -3676,56 +3676,22 @@ def _select_auto_trade_contract(
     if ml_signal not in ('BUY', 'SELL'):
         return None
     
-    # NSE Strategy: Use ATM Options from Weekly Expiry
+    # NSE Strategy: Use Deep ITM Options (2 strikes from ATM) from Weekly Expiry
     if exchange == 'NSE':
-        side_calls = ml_signal == 'BUY'
-        candidates = calls if side_calls else puts
-        option_type = 'CE' if side_calls else 'PE'
-        
-        if not candidates:
-            logging.warning(f"[{exchange}] No {option_type} options available in weekly expiry")
-            return None
-        
-        # Find ATM option (position closest to 0)
-        best_opt: Optional[Dict[str, Any]] = None
-        best_dist: float = float('inf')
-        
-        for opt in candidates:
-            price = opt.get('ltp')
-            if price is None:
-                continue
-            
-            pos = opt.get('position')
-            try:
-                dist = abs(float(pos)) if pos is not None else float('inf')
-            except (TypeError, ValueError):
-                continue
-            
-            if dist < best_dist:
-                best_opt = opt
-                best_dist = dist
-        
-        if not best_opt:
-            logging.warning(f"[{exchange}] Could not find ATM {option_type} in weekly expiry")
-            return None
-        
-        symbol = best_opt.get('symbol')
-        ltp = best_opt.get('ltp')
-        if symbol is None or ltp is None:
-            return None
-        
-        try:
-            current_price = float(ltp)
-        except (TypeError, ValueError):
-            return None
-        
-        position = best_opt.get('position', 0)
-        logging.info(
-            f"[{exchange}] Selected weekly expiry {option_type}: {symbol} @ {current_price:.2f} "
-            f"(position: {position}, Weekly expiry)"
+        result = _select_deep_itm_contract(
+            calls=calls,
+            puts=puts,
+            ml_signal=ml_signal,
+            target_strikes_from_atm=2
         )
-        
-        return symbol, option_type, current_price
+        if result:
+            symbol, option_type, price = result
+            logging.info(
+                f"[{exchange}] Selected deep ITM {option_type} from weekly expiry: {symbol} @ {price:.2f}"
+            )
+        else:
+            logging.warning(f"[{exchange}] Could not find deep ITM option in weekly expiry")
+        return result
     
     # Monthly Expiry Strategy: BANKNIFTY_MONTHLY, NIFTY_MONTHLY
     # Use ATM options from monthly expiry
