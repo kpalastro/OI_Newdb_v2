@@ -67,22 +67,61 @@ logging.basicConfig(
 REGIME_FEATURES = ['vix', 'realized_vol_5m', 'pcr_total_oi_zscore', 'price_roc_30m', 'breadth_divergence']
 REGIME_FEATURES_FALLBACK = ['vix', 'realized_vol_5m', 'pcr_total_oi', 'price_roc_30m', 'breadth_divergence']
 
-DEFAULT_MODEL_PARAMS: Dict[str, object] = {
+# Exchange-specific model parameters (optimized from research experiments)
+DEFAULT_MODEL_PARAMS_NSE: Dict[str, object] = {
     'objective': 'multiclass',
     'num_class': 3,
-    'n_estimators': 500,  # Reduced from 1000
-    'learning_rate': 0.02,
-    'num_leaves': 32,
+    'n_estimators': 200,  # Updated from research (was 500)
+    'learning_rate': 0.027913471162012638,  # Updated from research (was 0.02)
+    'num_leaves': 24,  # Updated from research (was 32)
+    'max_depth': -1,  # Updated from research (was 6)
+    'class_weight': 'balanced',
+    'n_jobs': -1,
+    'random_state': 42,
+    'colsample_bytree': 0.9090391410786836,
+    'subsample': 0.6869712198695495,
+    'verbosity': -1,
+    'min_child_samples': 20,
+    'min_split_gain': 0.0,
+}
+
+DEFAULT_MODEL_PARAMS_BSE: Dict[str, object] = {
+    'objective': 'multiclass',
+    'num_class': 3,
+    'n_estimators': 500,
+    'learning_rate': 0.0798336241793092,  # Updated from research (was 0.02)
     'max_depth': 6,
     'class_weight': 'balanced',
     'n_jobs': -1,
     'random_state': 42,
-    'colsample_bytree': 0.8,
-    'subsample': 0.8,
+    'colsample_bytree': 0.8182262939300189,
+    'subsample': 0.7834206240966212,
     'verbosity': -1,
-    'min_child_samples': 20,  # Prevent overfitting on small splits
-    'min_split_gain': 0.0,  # Allow splits even with minimal gain
+    'min_child_samples': 20,
+    'min_split_gain': 0.0,
+    'eval_metric': 'mlogloss',
+    'reg_lambda': 2.2619943413416426,
+    'tree_method': 'hist',
 }
+
+# Fallback to NSE params for backward compatibility
+DEFAULT_MODEL_PARAMS = DEFAULT_MODEL_PARAMS_NSE
+
+
+def get_model_params(exchange: str) -> Dict[str, object]:
+    """
+    Get model parameters for a specific exchange.
+    
+    Args:
+        exchange: Exchange name ('NSE' or 'BSE')
+    
+    Returns:
+        Dictionary of model parameters
+    """
+    if exchange.upper() == 'BSE':
+        return DEFAULT_MODEL_PARAMS_BSE.copy()
+    else:
+        return DEFAULT_MODEL_PARAMS_NSE.copy()
 
 def _log_feature_importance(
     model: lgb.LGBMClassifier,
@@ -366,6 +405,7 @@ def define_triple_barrier_target(
 def train_regime_aware_model(
     df: pd.DataFrame,
     feature_cols: List[str],
+    exchange: str = 'NSE',
     n_splits: int = 5
 ) -> Dict[str, Any]:
     """
@@ -449,7 +489,8 @@ def train_regime_aware_model(
         # Train Main Model with early stopping
         print(f"DEBUG: Fold {fold+1}: Training main model on {len(y_train)} samples...")
         logging.info(f"Fold {fold+1}: Training main model on {len(y_train)} samples...")
-        clf = lgb.LGBMClassifier(**DEFAULT_MODEL_PARAMS)
+        model_params = get_model_params(exchange)
+        clf = lgb.LGBMClassifier(**model_params)
         
         # Use early stopping if we have enough data
         if len(y_train) > 1000:
@@ -750,7 +791,8 @@ def final_training_run(exchange: str, df: pd.DataFrame, feature_cols: List[str])
         logging.info(f"Regime {r}: {regime_count} samples, target distribution: {dict(zip(unique_targets, counts))}")
         
         # Use early stopping for regime models if enough data
-        model = lgb.LGBMClassifier(**DEFAULT_MODEL_PARAMS)
+        model_params = get_model_params(exchange)
+        model = lgb.LGBMClassifier(**model_params)
         
         if regime_count > 500:
             # Split for early stopping
@@ -846,7 +888,7 @@ def train(exchange: str, days: int = 90):
     # Ensure feature_cols doesn't have duplicates
     feature_cols = list(dict.fromkeys([c for c in REQUIRED_FEATURE_COLUMNS if c in df.columns]))
     print(f"DEBUG: Using {len(feature_cols)} features for CV. DataFrame shape: {df.shape}")
-    cv_results = train_regime_aware_model(df, feature_cols)
+    cv_results = train_regime_aware_model(df, feature_cols, exchange=exchange)
     print(f"DEBUG: Cross-validation complete. {len(cv_results)} folds processed.")
     
     print("DEBUG: Calculating CV metrics...")

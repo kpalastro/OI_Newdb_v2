@@ -59,6 +59,10 @@
             --bs-table-striped-bg: rgba(255, 255, 255, 0.07);
             color: #f7fafc;
         }
+        .btn-outline-light.active {
+            background-color: rgba(255, 255, 255, 0.2);
+            border-color: rgba(255, 255, 255, 0.5);
+        }
     </style>
 </head>
 <body>
@@ -108,10 +112,42 @@
             </div>
         </div>
 
+        <!-- Family Statistics Summary -->
+        <div class="card mt-4">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h5 class="card-title mb-0">Model Family Statistics</h5>
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-dark table-striped align-middle">
+                        <thead>
+                            <tr>
+                                <th>Exchange</th>
+                                <th>Family</th>
+                                <th>Segments</th>
+                                <th>F1 Macro (Mean)</th>
+                                <th>F1 Macro (Max)</th>
+                                <th>F1 Macro (Min)</th>
+                                <th>F1 Macro (Std)</th>
+                                <th>Accuracy (Mean)</th>
+                                <th>Best Segment</th>
+                            </tr>
+                        </thead>
+                        <tbody id="familyStatsTable"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Walk-Forward Segments (All or Best) -->
         <div class="card mt-4">
             <div class="card-body">
                 <div class="d-flex justify-content-between align-items-center mb-3">
                     <h5 class="card-title mb-0">{{ strings.monitoring_walkforward_label }}</h5>
+                    <div class="btn-group" role="group">
+                        <button type="button" class="btn btn-sm btn-outline-light active" id="viewBestBtn" onclick="toggleView('best')">Best Only</button>
+                        <button type="button" class="btn btn-sm btn-outline-light" id="viewAllBtn" onclick="toggleView('all')">All Segments</button>
+                    </div>
                 </div>
                 <div class="table-responsive">
                     <table class="table table-dark table-striped align-middle">
@@ -122,6 +158,9 @@
                                 <th>Segment</th>
                                 <th>Accuracy</th>
                                 <th>Macro F1</th>
+                                <th>F1 Weighted</th>
+                                <th>Precision</th>
+                                <th>Recall</th>
                                 <th>Optuna Score</th>
                             </tr>
                         </thead>
@@ -151,6 +190,7 @@
                 renderCvChart(data);
                 renderEquityChart(data);
                 renderAccuracyHeatmap(data);
+                renderFamilyStatsTable(data);
                 renderWalkForwardTable(data);
             } catch (error) {
                 console.error('Failed to load health data:', error);
@@ -172,9 +212,31 @@
                 const auto = report.auto_ml || {};
                 const cv = training.cv_results || [];
                 // Try multiple possible keys for target distribution
-                const targetDist = training.target_stats || training.target_distribution || 
+                // Prioritize target_distribution (proportions) over target_stats (counts)
+                let targetDist = training.target_distribution || 
                                  (cv.length > 0 && cv[0].target_distribution ? 
-                                  cv[0].target_distribution : {}) || {};
+                                  cv[0].target_distribution : null);
+                
+                // If target_distribution not found, try to extract from target_stats
+                if (!targetDist && training.target_stats) {
+                    const stats = training.target_stats;
+                    // If target_stats has class_counts, convert to proportions
+                    if (stats.class_counts && stats.total_samples) {
+                        const total = stats.total_samples;
+                        targetDist = {};
+                        for (const [key, count] of Object.entries(stats.class_counts)) {
+                            targetDist[key] = count / total;
+                        }
+                    } else {
+                        // Fallback: use target_stats directly if it looks like distribution
+                        targetDist = stats;
+                    }
+                }
+                
+                // Final fallback to empty object
+                if (!targetDist) {
+                    targetDist = {};
+                }
                 // Try multiple possible keys for optuna params
                 const optuna = training.optuna_params || training.best_params || 
                               (auto.best_by_family && Object.keys(auto.best_by_family).length > 0 ? 
@@ -358,42 +420,163 @@
             container.innerHTML = rows;
         }
 
+        let currentView = 'best'; // 'best' or 'all'
+        let allSegmentsData = {};
+
+        function toggleView(view) {
+            currentView = view;
+            document.getElementById('viewBestBtn').classList.toggle('active', view === 'best');
+            document.getElementById('viewAllBtn').classList.toggle('active', view === 'all');
+            renderWalkForwardTable(allSegmentsData);
+        }
+
+        function calculateFamilyStats(data) {
+            const stats = {};
+            Object.entries(data).forEach(([exchange, report]) => {
+                const autoMl = report.auto_ml || {};
+                const segments = autoMl.segments || [];
+                
+                if (!stats[exchange]) stats[exchange] = {};
+                
+                // Group segments by family
+                const familyGroups = {};
+                segments.forEach(segment => {
+                    const family = segment.family || 'Unknown';
+                    if (!familyGroups[family]) {
+                        familyGroups[family] = [];
+                    }
+                    const metrics = segment.metrics || {};
+                    if (metrics.f1_macro !== undefined && metrics.f1_macro !== null) {
+                        familyGroups[family].push({
+                            segment_id: segment.segment_id,
+                            f1_macro: typeof metrics.f1_macro === 'number' ? metrics.f1_macro : parseFloat(metrics.f1_macro) || 0,
+                            accuracy: typeof metrics.accuracy === 'number' ? metrics.accuracy : parseFloat(metrics.accuracy) || 0,
+                            optuna_score: segment.optuna_score
+                        });
+                    }
+                });
+                
+                // Calculate statistics per family
+                Object.entries(familyGroups).forEach(([family, metricsList]) => {
+                    if (metricsList.length === 0) return;
+                    
+                    const f1Scores = metricsList.map(m => m.f1_macro);
+                    const accScores = metricsList.map(m => m.accuracy);
+                    
+                    const mean = arr => arr.reduce((a, b) => a + b, 0) / arr.length;
+                    const std = arr => {
+                        const m = mean(arr);
+                        return Math.sqrt(arr.reduce((sum, val) => sum + Math.pow(val - m, 2), 0) / arr.length);
+                    };
+                    
+                    const bestSegment = metricsList.reduce((best, curr) => 
+                        curr.f1_macro > best.f1_macro ? curr : best
+                    );
+                    
+                    stats[exchange][family] = {
+                        count: metricsList.length,
+                        f1_mean: mean(f1Scores),
+                        f1_max: Math.max(...f1Scores),
+                        f1_min: Math.min(...f1Scores),
+                        f1_std: std(f1Scores),
+                        acc_mean: mean(accScores),
+                        best_segment: bestSegment.segment_id,
+                        best_f1: bestSegment.f1_macro
+                    };
+                });
+            });
+            return stats;
+        }
+
+        function renderFamilyStatsTable(data) {
+            const body = document.getElementById('familyStatsTable');
+            const stats = calculateFamilyStats(data);
+            const rows = [];
+            
+            Object.entries(stats).forEach(([exchange, families]) => {
+                // Sort families by mean F1 (descending)
+                const sortedFamilies = Object.entries(families)
+                    .sort((a, b) => b[1].f1_mean - a[1].f1_mean);
+                
+                sortedFamilies.forEach(([family, stat]) => {
+                    const isBest = sortedFamilies[0][0] === family;
+                    rows.push(`
+                        <tr ${isBest ? 'style="background: rgba(96, 165, 250, 0.1);"' : ''}>
+                            <td style="color: #f7fafc;">${exchange}</td>
+                            <td style="color: ${isBest ? '#60a5fa' : '#f7fafc'}; font-weight: ${isBest ? '600' : 'normal'}">
+                                ${family} ${isBest ? '🏆' : ''}
+                            </td>
+                            <td style="color: #f7fafc;">${stat.count}</td>
+                            <td style="color: #f7fafc;">${formatPercent(stat.f1_mean)}</td>
+                            <td style="color: #f7fafc;">${formatPercent(stat.f1_max)}</td>
+                            <td style="color: #f7fafc;">${formatPercent(stat.f1_min)}</td>
+                            <td style="color: #a0aec0;">±${formatPercent(stat.f1_std)}</td>
+                            <td style="color: #f7fafc;">${formatPercent(stat.acc_mean)}</td>
+                            <td style="color: #f7fafc;">${stat.best_segment} (${formatPercent(stat.best_f1)})</td>
+                        </tr>
+                    `);
+                });
+            });
+            
+            body.innerHTML = rows.length ? rows.join('') : `
+                <tr>
+                    <td colspan="9" class="text-muted" style="color: #a0aec0 !important;">Run train_orchestrator.py to populate statistics.</td>
+                </tr>`;
+        }
+
         function renderWalkForwardTable(data) {
+            allSegmentsData = data; // Store for toggle
             const body = document.getElementById('walkForwardTable');
             const rows = [];
+            
             Object.entries(data).forEach(([exchange, report]) => {
                 const autoMl = report.auto_ml || {};
                 const bestFamilies = autoMl.best_by_family || {};
                 const segments = autoMl.segments || [];
                 
-                // If we have best_by_family, use that
-                if (Object.keys(bestFamilies).length > 0) {
-                    Object.entries(bestFamilies).forEach(([family, entry]) => {
-                        const metrics = entry.metrics || {};
-                        rows.push(`
-                            <tr>
-                                <td style="color: #f7fafc;">${exchange}</td>
-                                <td style="color: #f7fafc;">${family}</td>
-                                <td style="color: #f7fafc;">${entry.segment_id || '—'}</td>
-                                <td style="color: #f7fafc;">${formatPercent(metrics.accuracy)}</td>
-                                <td style="color: #f7fafc;">${formatPercent(metrics.f1_macro)}</td>
-                                <td style="color: #f7fafc;">${entry.optuna_score !== undefined && entry.optuna_score !== null ? 
-                                    (typeof entry.optuna_score === 'number' ? entry.optuna_score.toFixed(3) : entry.optuna_score) : '—'}</td>
-                            </tr>
-                        `);
-                    });
-                } 
-                // Otherwise, try to use segments data
-                else if (segments.length > 0) {
-                    segments.forEach(segment => {
+                if (currentView === 'best') {
+                    // Show only best segment per family
+                    if (Object.keys(bestFamilies).length > 0) {
+                        Object.entries(bestFamilies).forEach(([family, entry]) => {
+                            const metrics = entry.metrics || {};
+                            rows.push(`
+                                <tr>
+                                    <td style="color: #f7fafc;">${exchange}</td>
+                                    <td style="color: #60a5fa; font-weight: 600;">${family}</td>
+                                    <td style="color: #f7fafc;">${entry.segment_id || '—'}</td>
+                                    <td style="color: #f7fafc;">${formatPercent(metrics.accuracy)}</td>
+                                    <td style="color: #f7fafc; font-weight: 600;">${formatPercent(metrics.f1_macro)}</td>
+                                    <td style="color: #a0aec0;">${formatPercent(metrics.f1_weighted)}</td>
+                                    <td style="color: #a0aec0;">${formatPercent(metrics.precision_macro)}</td>
+                                    <td style="color: #a0aec0;">${formatPercent(metrics.recall_macro)}</td>
+                                    <td style="color: #f7fafc;">${entry.optuna_score !== undefined && entry.optuna_score !== null ? 
+                                        (typeof entry.optuna_score === 'number' ? entry.optuna_score.toFixed(3) : entry.optuna_score) : '—'}</td>
+                                </tr>
+                            `);
+                        });
+                    }
+                } else {
+                    // Show all segments, sorted by F1 descending
+                    const sortedSegments = segments
+                        .filter(s => s.metrics && s.metrics.f1_macro !== undefined && s.metrics.f1_macro > 0)
+                        .sort((a, b) => (b.metrics.f1_macro || 0) - (a.metrics.f1_macro || 0));
+                    
+                    sortedSegments.forEach(segment => {
                         const metrics = segment.metrics || {};
+                        const isBest = bestFamilies[segment.family] && 
+                                     bestFamilies[segment.family].segment_id === segment.segment_id;
                         rows.push(`
-                            <tr>
+                            <tr ${isBest ? 'style="background: rgba(96, 165, 250, 0.1);"' : ''}>
                                 <td style="color: #f7fafc;">${exchange}</td>
-                                <td style="color: #f7fafc;">${segment.family || '—'}</td>
+                                <td style="color: ${isBest ? '#60a5fa' : '#f7fafc'}; font-weight: ${isBest ? '600' : 'normal'}">
+                                    ${segment.family || '—'} ${isBest ? '⭐' : ''}
+                                </td>
                                 <td style="color: #f7fafc;">${segment.segment_id || '—'}</td>
                                 <td style="color: #f7fafc;">${formatPercent(metrics.accuracy)}</td>
-                                <td style="color: #f7fafc;">${formatPercent(metrics.f1_macro)}</td>
+                                <td style="color: #f7fafc; font-weight: ${isBest ? '600' : 'normal'}">${formatPercent(metrics.f1_macro)}</td>
+                                <td style="color: #a0aec0;">${formatPercent(metrics.f1_weighted)}</td>
+                                <td style="color: #a0aec0;">${formatPercent(metrics.precision_macro)}</td>
+                                <td style="color: #a0aec0;">${formatPercent(metrics.recall_macro)}</td>
                                 <td style="color: #f7fafc;">${segment.optuna_score !== undefined && segment.optuna_score !== null ? 
                                     (typeof segment.optuna_score === 'number' ? segment.optuna_score.toFixed(3) : segment.optuna_score) : '—'}</td>
                             </tr>
@@ -401,9 +584,10 @@
                     });
                 }
             });
+            
             body.innerHTML = rows.length ? rows.join('') : `
                 <tr>
-                    <td colspan="6" class="text-muted" style="color: #a0aec0 !important;">Run train_orchestrator.py to populate walk-forward results.</td>
+                    <td colspan="9" class="text-muted" style="color: #a0aec0 !important;">Run train_orchestrator.py to populate walk-forward results.</td>
                 </tr>`;
         }
 
@@ -440,8 +624,10 @@
         }
 
         function formatPercent(value) {
-            if (typeof value !== 'number' || isNaN(value)) return '—';
-            return (value * 100).toFixed(1) + '%';
+            if (value === null || value === undefined) return '—';
+            const num = typeof value === 'number' ? value : parseFloat(value);
+            if (isNaN(num)) return '—';
+            return (num * 100).toFixed(1) + '%';
         }
 
         function summarizeBestFamily(bestByFamily = {}) {
