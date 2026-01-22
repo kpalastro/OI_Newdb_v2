@@ -10,10 +10,29 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from .engine import BacktestConfig, BacktestEngine
+
+
+def _sanitize_for_json(obj: Any) -> Any:
+    """
+    Recursively replace NaN and Infinity values with None (which becomes null in JSON).
+    JSON doesn't support NaN/Infinity, so we convert them to null.
+    """
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    elif isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_sanitize_for_json(item) for item in obj]
+    else:
+        return obj
 
 
 def _parse_date(value: str):
@@ -73,8 +92,9 @@ def main() -> None:
 
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
+        result_dict = _sanitize_for_json(result.to_dict())
         with open(args.output, "w", encoding="utf-8") as handle:
-            json.dump(result.to_dict(), handle, indent=2)
+            json.dump(result_dict, handle, indent=2)
         logging.info("Saved backtest report to %s", args.output)
     else:
         # Auto-save to dashboard location if no output specified
@@ -82,7 +102,7 @@ def main() -> None:
         backtest_dir.mkdir(parents=True, exist_ok=True)
         dashboard_file = backtest_dir / f'{args.exchange.upper()}.json'
         try:
-            result_dict = result.to_dict()
+            result_dict = _sanitize_for_json(result.to_dict())
             with open(dashboard_file, "w", encoding="utf-8") as handle:
                 json.dump(result_dict, handle, indent=2)
             # Verify the file was written correctly

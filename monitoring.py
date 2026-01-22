@@ -5,8 +5,10 @@ Enhanced with Phase 2 metrics monitoring.
 from __future__ import annotations
 
 import json
+import math
+import re
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Any
 
 from flask import Blueprint, jsonify, render_template, request
 
@@ -19,12 +21,39 @@ BACKTEST_DIR = Path('reports') / 'backtests'
 ONLINE_STATE_FILE = Path('reports') / 'online_learning_state.json'
 
 
+def _sanitize_nan(obj: Any) -> Any:
+    """
+    Recursively replace NaN, Infinity values with None (which becomes null in JSON).
+    """
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    elif isinstance(obj, dict):
+        return {k: _sanitize_nan(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_sanitize_nan(item) for item in obj]
+    else:
+        return obj
+
+
 def _load_json(path: Path) -> Dict:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text(encoding='utf-8'))
-    except json.JSONDecodeError:
+        content = path.read_text(encoding='utf-8')
+        # Replace NaN, Infinity, -Infinity with null before parsing
+        # This handles cases where JSON was written with NaN (invalid JSON)
+        content = re.sub(r'\bNaN\b', 'null', content)
+        content = re.sub(r'\bInfinity\b', 'null', content)
+        content = re.sub(r'\b-Infinity\b', 'null', content)
+        data = json.loads(content)
+        # Sanitize any remaining NaN values that might have been parsed as strings
+        return _sanitize_nan(data)
+    except json.JSONDecodeError as e:
+        # Log the error for debugging but return empty dict
+        import logging
+        logging.warning(f"Failed to parse JSON from {path}: {e}")
         return {}
 
 
