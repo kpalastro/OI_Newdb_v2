@@ -71,36 +71,36 @@ REGIME_FEATURES_FALLBACK = ['vix', 'realized_vol_5m', 'pcr_total_oi', 'price_roc
 DEFAULT_MODEL_PARAMS_NSE: Dict[str, object] = {
     'objective': 'multiclass',
     'num_class': 3,
-    'n_estimators': 200,  # Updated from research (was 500)
-    'learning_rate': 0.027913471162012638,  # Updated from research (was 0.02)
-    'num_leaves': 24,  # Updated from research (was 32)
+    'n_estimators': 800,  # Updated from research (was 500)
+    'learning_rate': 0.048890719316206935,  # Updated from research (was 0.02)
+    'num_leaves': 88,  # Updated from research (was 32)
     'max_depth': -1,  # Updated from research (was 6)
     'class_weight': 'balanced',
     'n_jobs': -1,
     'random_state': 42,
-    'colsample_bytree': 0.9090391410786836,
-    'subsample': 0.6869712198695495,
+    'colsample_bytree': 0.8715356175794136,
+    'subsample': 0.6368971339312606,
     'verbosity': -1,
     'min_child_samples': 20,
     'min_split_gain': 0.0,
 }
 
 DEFAULT_MODEL_PARAMS_BSE: Dict[str, object] = {
-    'objective': 'multiclass',
+    'objective': 'multi:softprob',
     'num_class': 3,
     'n_estimators': 500,
-    'learning_rate': 0.0798336241793092,  # Updated from research (was 0.02)
+    'learning_rate': 0.08541036312174702,  # Updated from research (was 0.02)
     'max_depth': 6,
     'class_weight': 'balanced',
     'n_jobs': -1,
     'random_state': 42,
-    'colsample_bytree': 0.8182262939300189,
-    'subsample': 0.7834206240966212,
+    'colsample_bytree': 0.7329218532570029,
+    'subsample': 0.8201804911554667,
     'verbosity': -1,
     'min_child_samples': 20,
     'min_split_gain': 0.0,
     'eval_metric': 'mlogloss',
-    'reg_lambda': 2.2619943413416426,
+    'reg_lambda': 1.9664943380472022,
     'tree_method': 'hist',
 }
 

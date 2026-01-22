@@ -529,10 +529,13 @@
                     <div class="info-group">
                         <div class="info-item"><div class="label">NIFTY</div><div class="value" id="niftyPrice">--</div></div>
                         <div class="info-item"><div class="label">PCR</div><div class="value" id="pcrNSE">--</div></div>
+                        <div class="info-item"><div class="label">PCRV</div><div class="value" id="pcrvNSE">--</div></div>
                         <div class="info-item"><div class="label">{{ strings.info_bar_future_oi_change_label }}</div><div class="value metric-neutral" id="futureOiChangeNSE">--%</div></div>
                         <div class="info-item"><div class="label">{{ strings.info_bar_vix_label }}</div><div class="value" id="vixValue">--</div></div>
                         <div class="info-item"><div class="label">{{ strings.info_bar_itm_ce_label }}</div><div class="value metric-neutral" id="itmCeNSE">--%</div></div>
                         <div class="info-item"><div class="label">{{ strings.info_bar_itm_pe_label }}</div><div class="value metric-neutral" id="itmPeNSE">--%</div></div>
+                        <div class="info-item"><div class="label">ITM CE Vol Δ%</div><div class="value metric-neutral" id="itmCeVolNSE">--%</div></div>
+                        <div class="info-item"><div class="label">ITM PE Vol Δ%</div><div class="value metric-neutral" id="itmPeVolNSE">--%</div></div>
                         <div class="info-item"><div class="label">MTM</div><div class="value" id="mtmNSE">₹0</div></div>
                         <div class="info-item"><div class="label">P&L</div><div class="value" id="pnlNSE">₹0</div></div>
                         <div class="info-item"><div class="label">Updated</div><div class="value" id="lastUpdateNSE">--:--</div></div>
@@ -543,9 +546,12 @@
                     <div class="info-group">
                         <div class="info-item"><div class="label">SENSEX</div><div class="value" id="sensexPrice">--</div></div>
                         <div class="info-item"><div class="label">PCR</div><div class="value" id="pcrBSE">--</div></div>
+                        <div class="info-item"><div class="label">PCRV</div><div class="value" id="pcrvBSE">--</div></div>
                         <div class="info-item"><div class="label">{{ strings.info_bar_future_oi_change_label }}</div><div class="value metric-neutral" id="futureOiChangeBSE">--%</div></div>
                         <div class="info-item"><div class="label">{{ strings.info_bar_itm_ce_label }}</div><div class="value metric-neutral" id="itmCeBSE">--%</div></div>
                         <div class="info-item"><div class="label">{{ strings.info_bar_itm_pe_label }}</div><div class="value metric-neutral" id="itmPeBSE">--%</div></div>
+                        <div class="info-item"><div class="label">ITM CE Vol Δ%</div><div class="value metric-neutral" id="itmCeVolBSE">--%</div></div>
+                        <div class="info-item"><div class="label">ITM PE Vol Δ%</div><div class="value metric-neutral" id="itmPeVolBSE">--%</div></div>
                         <div class="info-item"><div class="label">MTM</div><div class="value" id="mtmBSE">₹0</div></div>
                         <div class="info-item"><div class="label">P&L</div><div class="value" id="pnlBSE">₹0</div></div>
                         <div class="info-item"><div class="label">Updated</div><div class="value" id="lastUpdateBSE">--:--</div></div>
@@ -893,6 +899,7 @@
             // Top Header Info
             document.getElementById(exchange === 'NSE' ? 'niftyPrice' : 'sensexPrice').textContent = data.underlying_price?.toFixed(2) || '--';
             document.getElementById(`pcr${suffix}`).textContent = data.pcr?.toFixed(2) || '--';
+            document.getElementById(`pcrv${suffix}`).textContent = data.pcrv?.toFixed(2) || '--';
             if (exchange === 'NSE') document.getElementById('vixValue').textContent = data.vix?.toFixed(2) || '--';
             document.getElementById(`lastUpdate${suffix}`).textContent = data.last_update || '--:--';
             
@@ -901,6 +908,8 @@
             updateItmChange(data.percent_oichange_fut_3m, `futureOiChange${suffix}`);
             updateItmChange(data.itm_oi_ce_pct_change, `itmCe${suffix}`);
             updateItmChange(data.itm_oi_pe_pct_change, `itmPe${suffix}`);
+            updateItmChange(data.itm_volume_ce_pct_change, `itmCeVol${suffix}`);
+            updateItmChange(data.itm_volume_pe_pct_change, `itmPeVol${suffix}`);
             
             // Main Tables
             if (data.call_options && data.put_options) updateOptionChain(data.call_options, data.put_options, exchange, data.diff_thresholds);
