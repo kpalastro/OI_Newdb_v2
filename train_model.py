@@ -86,22 +86,20 @@ DEFAULT_MODEL_PARAMS_NSE: Dict[str, object] = {
 }
 
 DEFAULT_MODEL_PARAMS_BSE: Dict[str, object] = {
-    'objective': 'multi:softprob',
+    'objective': 'multiclass',  # Fixed: was 'multi:softprob' (XGBoost), now LightGBM
     'num_class': 3,
-    'n_estimators': 500,
-    'learning_rate': 0.08541036312174702,  # Updated from research (was 0.02)
-    'max_depth': 6,
+    'n_estimators': 600,  # Updated from research
+    'learning_rate': 0.07019344373269347,  # Updated from research
+    'num_leaves': 32,  # Updated from research
+    'max_depth': -1,  # Updated from research (was 6)
     'class_weight': 'balanced',
     'n_jobs': -1,
     'random_state': 42,
-    'colsample_bytree': 0.7329218532570029,
-    'subsample': 0.8201804911554667,
+    'colsample_bytree': 0.7318451861936786,  # Updated from research
+    'subsample': 0.8999225224026681,  # Updated from research
     'verbosity': -1,
     'min_child_samples': 20,
     'min_split_gain': 0.0,
-    'eval_metric': 'mlogloss',
-    'reg_lambda': 1.9664943380472022,
-    'tree_method': 'hist',
 }
 
 # Fallback to NSE params for backward compatibility
