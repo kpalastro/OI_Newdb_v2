@@ -200,6 +200,7 @@ class LightGBMFamily(ModelFamily):
             "colsample_bytree": 0.8,
             "random_state": 42,
             "n_jobs": -1,
+            "force_col_wise": True,  # Remove overhead of auto-choosing threading
         }
 
     def build_model(self, params: Dict[str, Any]):

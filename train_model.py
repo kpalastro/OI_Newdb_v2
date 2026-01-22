@@ -71,27 +71,28 @@ REGIME_FEATURES_FALLBACK = ['vix', 'realized_vol_5m', 'pcr_total_oi', 'price_roc
 DEFAULT_MODEL_PARAMS_NSE: Dict[str, object] = {
     'objective': 'multiclass',
     'num_class': 3,
-    'n_estimators': 800,  # Updated from research (was 500)
-    'learning_rate': 0.048890719316206935,  # Updated from research (was 0.02)
-    'num_leaves': 88,  # Updated from research (was 32)
+    'n_estimators': 200,  # Updated from research (was 500)
+    'learning_rate': 0.027913471162012638,  # Updated from research (was 0.02)
+    'num_leaves': 24,  # Updated from research (was 32)
     'max_depth': -1,  # Updated from research (was 6)
     'class_weight': 'balanced',
     'n_jobs': -1,
     'random_state': 42,
-    'colsample_bytree': 0.8715356175794136,
-    'subsample': 0.6368971339312606,
+    'colsample_bytree': 0.9090391410786836,
+    'subsample': 0.6869712198695495,
     'verbosity': -1,
     'min_child_samples': 20,
     'min_split_gain': 0.0,
+    'force_col_wise': True,  # Remove overhead of auto-choosing threading
 }
 
 DEFAULT_MODEL_PARAMS_BSE: Dict[str, object] = {
-    'objective': 'multiclass',  # Fixed: was 'multi:softprob' (XGBoost), now LightGBM
+    'objective': 'multiclass',
     'num_class': 3,
     'n_estimators': 600,  # Updated from research
     'learning_rate': 0.07019344373269347,  # Updated from research
     'num_leaves': 32,  # Updated from research
-    'max_depth': -1,  # Updated from research (was 6)
+    'max_depth': -1,  # Updated from research
     'class_weight': 'balanced',
     'n_jobs': -1,
     'random_state': 42,
@@ -100,6 +101,7 @@ DEFAULT_MODEL_PARAMS_BSE: Dict[str, object] = {
     'verbosity': -1,
     'min_child_samples': 20,
     'min_split_gain': 0.0,
+    'force_col_wise': True,  # Remove overhead of auto-choosing threading
 }
 
 # Fallback to NSE params for backward compatibility
@@ -462,7 +464,7 @@ def train_regime_aware_model(
         # Feature Selection on Train
         print(f"DEBUG: Fold {fold+1}: Training feature selector on {len(X_train_feats)} samples, {len(feature_cols_available)} features (this may take 30-60 seconds)...")
         logging.info(f"Fold {fold+1}: Training feature selector on {len(X_train_feats)} samples, {len(feature_cols_available)} features...")
-        lgb_selector = lgb.LGBMClassifier(n_estimators=50, random_state=42, verbosity=-1)  # Reduced for speed
+        lgb_selector = lgb.LGBMClassifier(n_estimators=50, random_state=42, verbosity=-1, force_col_wise=True)  # Reduced for speed
         lgb_selector.fit(X_train_feats, y_train)
         print(f"DEBUG: Fold {fold+1}: Feature selector training complete.")
 
@@ -750,7 +752,7 @@ def final_training_run(exchange: str, df: pd.DataFrame, feature_cols: List[str])
     
     print(f"DEBUG: Final training - Training base model for feature selection on {len(y_full)} samples...")
     logging.info(f"Training base model for feature selection on {len(y_full)} samples...")
-    base_model = lgb.LGBMClassifier(n_estimators=50, random_state=42, verbosity=-1)  # Reduced for speed
+    base_model = lgb.LGBMClassifier(n_estimators=50, random_state=42, verbosity=-1, force_col_wise=True)  # Reduced for speed
     base_model.fit(X_full, y_full)
     print("DEBUG: Final training - Base model training complete.")
 
