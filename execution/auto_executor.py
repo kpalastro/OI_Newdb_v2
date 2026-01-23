@@ -23,6 +23,13 @@ except ImportError:
     RL_EXECUTION_AVAILABLE = False
     RLExecutor = None
 
+# ITM Feature Evaluator (optional)
+try:
+    from utils.itm_feature_evaluator import evaluate_itm_features
+    ITM_EVALUATOR_AVAILABLE = True
+except ImportError:
+    ITM_EVALUATOR_AVAILABLE = False
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -258,6 +265,28 @@ class AutoExecutor:
                 constraint_violation=False,
             )
             return result
+        
+        # ITM Feature Check (Safety Net - already filtered in ml_core, but double-check)
+        # This is a safety net in case features_dict is available
+        if ITM_EVALUATOR_AVAILABLE and hasattr(signal, 'features_dict') and signal.features_dict:
+            try:
+                itm_eval = evaluate_itm_features(signal.features_dict)
+                if itm_eval.get('should_skip_trade', False):
+                    result = ExecutionResult(
+                        executed=False,
+                        reason=f"ITM Filter: {', '.join(itm_eval.get('warnings', ['ITM conditions not optimal']))}"
+                    )
+                    self._record_paper_trade_metric(
+                        executed=False,
+                        reason=result.reason,
+                        signal=signal,
+                        quantity_lots=0,
+                        pnl=None,
+                        constraint_violation=False,
+                    )
+                    return result
+            except Exception as e:
+                LOGGER.warning(f"[{self.exchange}] ITM evaluation failed in executor: {e}")
         
         # Check confidence threshold
         if signal.confidence < self.config.min_confidence:

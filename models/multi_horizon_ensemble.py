@@ -26,8 +26,9 @@ class MultiHorizonEnsemble:
     Unified interface for multi-horizon predictions.
     Delegates to specialized models based on the HorizonRouter.
     """
-    def __init__(self, exchange: str):
+    def __init__(self, exchange: str, use_swing_ensemble: bool = True):
         self.exchange = exchange
+        self.use_swing_ensemble = use_swing_ensemble
         self.router = HorizonRouter()
         self.weights_loaded = False
         
@@ -38,7 +39,14 @@ class MultiHorizonEnsemble:
             LOGGER.warning("IntradayLSTMModel unavailable (missing torch).")
             self.intraday_model = None
             
-        self.swing_model = SwingTradingEnsemble()
+        # Initialize swing model based on ensemble preference
+        if self.use_swing_ensemble:
+            self.swing_model = SwingTradingEnsemble()
+            self.swing_single_model = None  # Single model fallback (LightGBM)
+        else:
+            # When ensemble is disabled, use single LightGBM model
+            self.swing_model = None
+            self.swing_single_model = self._create_single_swing_model()
         
         try:
             self.expiry_model = ExpiryDayTransformer()
@@ -47,6 +55,23 @@ class MultiHorizonEnsemble:
             self.expiry_model = None
         
         self._load_weights()
+    
+    def _create_single_swing_model(self):
+        """Create a single LightGBM model as fallback when ensemble is disabled."""
+        try:
+            from lightgbm import LGBMClassifier
+            model = LGBMClassifier(
+                n_estimators=500,
+                num_leaves=31,
+                learning_rate=0.05,
+                objective='multiclass',
+                n_jobs=-1
+            )
+            LOGGER.info(f"[{self.exchange}] Using single LightGBM model (ensemble disabled)")
+            return model
+        except ImportError:
+            LOGGER.warning("LightGBM not available for single model fallback")
+            return None
 
     def _load_weights(self):
         """
@@ -101,28 +126,48 @@ class MultiHorizonEnsemble:
             except Exception as e:
                 LOGGER.warning(f"Failed to load Transformer weights: {e}")
         
-        # 3. Load Swing Ensemble (Joblib - XGBoost/LightGBM)
+        # 3. Load Swing Model (Ensemble or Single)
         swing_path = model_dir / "swing_ensemble.pkl"
-        if swing_path.exists() and self.swing_model is not None and joblib is not None:
+        if swing_path.exists() and joblib is not None:
             try:
                 saved_data = joblib.load(swing_path)
                 
-                # Handle different save formats
-                if isinstance(saved_data, dict):
-                    # Format: {'models': {...}, 'weights': {...}, '_is_fitted': True}
-                    if 'models' in saved_data:
-                        self.swing_model.models = saved_data['models']
-                    if 'weights' in saved_data:
-                        self.swing_model.weights = saved_data['weights']
-                    self.swing_model._is_fitted = saved_data.get('_is_fitted', True)
-                elif isinstance(saved_data, SwingTradingEnsemble):
-                    # Direct object serialization
-                    self.swing_model = saved_data
-                    
-                LOGGER.info(f"✓ Loaded Swing Ensemble from {swing_path}")
-                loaded_count += 1
+                if self.use_swing_ensemble:
+                    # Load full ensemble
+                    if self.swing_model is not None:
+                        if isinstance(saved_data, dict):
+                            # Format: {'models': {...}, 'weights': {...}, '_is_fitted': True}
+                            if 'models' in saved_data:
+                                self.swing_model.models = saved_data['models']
+                            if 'weights' in saved_data:
+                                self.swing_model.weights = saved_data['weights']
+                            self.swing_model._is_fitted = saved_data.get('_is_fitted', True)
+                        elif isinstance(saved_data, SwingTradingEnsemble):
+                            # Direct object serialization
+                            self.swing_model = saved_data
+                        LOGGER.info(f"✓ Loaded Swing Ensemble from {swing_path}")
+                        loaded_count += 1
+                else:
+                    # Load single LightGBM model from ensemble
+                    if self.swing_single_model is not None:
+                        if isinstance(saved_data, dict) and 'models' in saved_data:
+                            # Extract LightGBM model from ensemble
+                            if 'lightgbm' in saved_data['models']:
+                                self.swing_single_model = saved_data['models']['lightgbm']
+                                LOGGER.info(f"✓ Loaded single LightGBM model from ensemble at {swing_path}")
+                                loaded_count += 1
+                            else:
+                                LOGGER.warning(f"LightGBM model not found in ensemble, using untrained model")
+                        elif isinstance(saved_data, SwingTradingEnsemble):
+                            # Extract LightGBM from SwingTradingEnsemble object
+                            if hasattr(saved_data, 'models') and 'lightgbm' in saved_data.models:
+                                self.swing_single_model = saved_data.models['lightgbm']
+                                LOGGER.info(f"✓ Loaded single LightGBM model from ensemble at {swing_path}")
+                                loaded_count += 1
+                            else:
+                                LOGGER.warning(f"LightGBM model not found in ensemble, using untrained model")
             except Exception as e:
-                LOGGER.warning(f"Failed to load Swing Ensemble: {e}")
+                LOGGER.warning(f"Failed to load Swing model: {e}")
         
         self.weights_loaded = loaded_count > 0
         
@@ -237,19 +282,61 @@ class MultiHorizonEnsemble:
                     horizon = 'swing'
                     result['horizon'] = 'swing'
                     
-            # 3. Swing (Ensemble)
+            # 3. Swing (Ensemble or Single Model)
             if horizon == 'swing':
-                if self.swing_model:
+                if self.use_swing_ensemble and self.swing_model:
+                    # Use ensemble
                     pred = self.swing_model.predict(feature_vector)
-                    # Mapping: 0=SELL, 1=HOLD, 2=BUY is standard for our pipeline?
-                    # Check MLSignalGenerator logic: {-1: 'SELL', 0: 'HOLD', 1: 'BUY'}
-                    # Usually classifiers output 0, 1, 2 indices. 
-                    # Let's map 0->SELL, 1->HOLD, 2->BUY for now, need verification with train script.
                     classes = ['SELL', 'HOLD', 'BUY'] 
                     result.update({
                         'signal': classes[pred['class']],
                         'probabilities': pred['probabilities'],
                         'confidence': max(pred['probabilities'])
+                    })
+                elif not self.use_swing_ensemble and self.swing_single_model:
+                    # Use single LightGBM model
+                    try:
+                        # Convert feature_vector to numpy array if needed
+                        if hasattr(feature_vector, 'values'):
+                            X = feature_vector.values
+                        else:
+                            X = np.array(feature_vector)
+                        
+                        if X.ndim == 1:
+                            X = X.reshape(1, -1)
+                        
+                        # Check if model is fitted
+                        if hasattr(self.swing_single_model, 'predict_proba'):
+                            probs = self.swing_single_model.predict_proba(X)[0]
+                            class_idx = int(probs.argmax())
+                            classes = ['SELL', 'HOLD', 'BUY']
+                            result.update({
+                                'signal': classes[class_idx],
+                                'probabilities': probs.tolist(),
+                                'confidence': float(max(probs))
+                            })
+                        else:
+                            # Model not fitted, return uniform probabilities
+                            LOGGER.warning(f"[{self.exchange}] Single swing model not fitted, returning HOLD")
+                            result.update({
+                                'signal': 'HOLD',
+                                'probabilities': [0.0, 1.0, 0.0],
+                                'confidence': 0.0
+                            })
+                    except Exception as e:
+                        LOGGER.error(f"[{self.exchange}] Single swing model prediction failed: {e}")
+                        result.update({
+                            'signal': 'HOLD',
+                            'probabilities': [0.0, 1.0, 0.0],
+                            'confidence': 0.0
+                        })
+                else:
+                    # No swing model available
+                    LOGGER.warning(f"[{self.exchange}] No swing model available (ensemble={self.use_swing_ensemble})")
+                    result.update({
+                        'signal': 'HOLD',
+                        'probabilities': [0.0, 1.0, 0.0],
+                        'confidence': 0.0
                     })
                 
         except Exception as e:

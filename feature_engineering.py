@@ -882,6 +882,16 @@ def engineer_live_feature_set(
     itm_vol_ce_change = features.get('itm_volume_ce_pct_change_3m_wavg', 0.0)
     itm_vol_pe_change = features.get('itm_volume_pe_pct_change_3m_wavg', 0.0)
     
+    # 10. ITM Optimal Range Features (NEW - based on reverse engineering)
+    # These binary indicators are easier for models to learn
+    try:
+        from utils.itm_feature_evaluator import create_itm_optimal_range_features
+        itm_optimal_features = create_itm_optimal_range_features(features)
+        features.update(itm_optimal_features)
+    except ImportError:
+        # ITM evaluator not available, skip
+        pass
+    
     # Volume dominance signal: Positive = PE volume dominance (bearish), Negative = CE volume dominance (bullish)
     features['itm_volume_dominance_signal'] = itm_vol_pe_change - itm_vol_ce_change
     features['itm_volume_divergence_strength'] = abs(itm_vol_pe_change - itm_vol_ce_change)

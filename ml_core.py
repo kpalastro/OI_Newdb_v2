@@ -25,6 +25,14 @@ from models.multi_horizon_ensemble import MultiHorizonEnsemble
 from regime_analysis import MarketRegimeDetector
 from feature_engineering import REQUIRED_FEATURE_COLUMNS
 
+# ITM Feature Evaluator (optional - only import if available)
+try:
+    from utils.itm_feature_evaluator import evaluate_itm_features, create_itm_optimal_range_features
+    ITM_EVALUATOR_AVAILABLE = True
+except ImportError:
+    ITM_EVALUATOR_AVAILABLE = False
+    logging.warning("ITM feature evaluator not available. ITM enforcement disabled.")
+
 SIGNAL_MAP = {-1: 'SELL', 0: 'HOLD', 1: 'BUY'}
 
 
@@ -32,11 +40,20 @@ class MLSignalGenerator:
     """
     Core ML engine that loads models and generates trading signals.
     """
-    def __init__(self, exchange: str):
+    def __init__(self, exchange: str, use_swing_ensemble: Optional[bool] = None):
         self.exchange = exchange
         
         # Phase 2: Multi-Horizon Ensemble
-        self.model_ensemble = MultiHorizonEnsemble(exchange)
+        # Load config if not explicitly provided
+        if use_swing_ensemble is None:
+            try:
+                from config import get_config
+                config = get_config()
+                use_swing_ensemble = config.use_swing_ensemble
+            except Exception:
+                use_swing_ensemble = True  # Default to True for backward compatibility
+        
+        self.model_ensemble = MultiHorizonEnsemble(exchange, use_swing_ensemble=use_swing_ensemble)
         self.models_loaded = True 
 
         # Phase 5: Enhanced Regime Detector
@@ -113,6 +130,38 @@ class MLSignalGenerator:
             horizon = ensemble_result.get('horizon', 'unknown')
             probabilities = ensemble_result.get('probabilities', [0.0, 0.0, 0.0]) # Sell, Hold, Buy
             
+            # --- ITM Feature Enforcement (NEW) ---
+            # Evaluate ITM features and apply filters/multipliers based on reverse engineering
+            itm_evaluation = None
+            if ITM_EVALUATOR_AVAILABLE:
+                try:
+                    # Add ITM optimal range features to features_dict for evaluation
+                    itm_optimal_features = create_itm_optimal_range_features(features_dict)
+                    features_dict_with_optimal = {**features_dict, **itm_optimal_features}
+                    
+                    itm_evaluation = evaluate_itm_features(features_dict_with_optimal)
+                    
+                    # Apply ITM skip filter (CRITICAL)
+                    if itm_evaluation.get('should_skip_trade', False):
+                        signal = 'HOLD'
+                        confidence = 0.0
+                        rationale = f"ITM Filter: {', '.join(itm_evaluation.get('warnings', []))}"
+                        metadata = {
+                            'regime': current_regime,
+                            'horizon': horizon,
+                            'itm_filter_applied': True,
+                            'itm_skip_reason': itm_evaluation.get('warnings', []),
+                            'itm_score': itm_evaluation.get('itm_score', 0.0)
+                        }
+                        return signal, confidence, rationale, metadata
+                    
+                    # Apply ITM confidence multiplier
+                    confidence = min(0.95, confidence * itm_evaluation.get('confidence_multiplier', 1.0))
+                    
+                except Exception as e:
+                    logging.warning(f"[{self.exchange}] ITM evaluation failed: {e}")
+                    itm_evaluation = None
+            
             # --- ITM OI Divergence Boost (Rule-Based) ---
             # Explicitly boost signal confidence if ITM OI shows strong directional divergence
             # This handles the specific "Red Market" scenario where models might be conservative.
@@ -173,12 +222,18 @@ class MLSignalGenerator:
             if signal != 'HOLD':
                 current_vol = float(features_dict.get('vix', 20.0)) / 100.0
                 
+                # Get ITM position multiplier if available
+                itm_position_mult = 1.0
+                if itm_evaluation:
+                    itm_position_mult = itm_evaluation.get('position_size_multiplier', 1.0)
+                
                 risk_payload = get_optimal_position_size(
                     ml_confidence=confidence,
                     win_rate=self.strategy_metrics['win_rate'],
                     avg_win_loss_ratio=self.strategy_metrics['avg_w_l_ratio'],
                     current_volatility=current_vol,
-                    regime_risk_scale=regime_config['risk_scale'] # Phase 5 Scaling
+                    regime_risk_scale=regime_config['risk_scale'],  # Phase 5 Scaling
+                    itm_position_multiplier=itm_position_mult  # NEW: ITM-based position sizing
                 )
 
             metadata = {
@@ -194,6 +249,21 @@ class MLSignalGenerator:
                 'rolling_accuracy': self._rolling_accuracy(),
                 'last_feedback_at': self.last_feedback_timestamp.isoformat() if self.last_feedback_timestamp else None,
             }
+            
+            # Add ITM evaluation metadata if available
+            if itm_evaluation:
+                metadata.update({
+                    'itm_score': itm_evaluation.get('itm_score', 0.0),
+                    'itm_confidence_multiplier': itm_evaluation.get('confidence_multiplier', 1.0),
+                    'itm_position_multiplier': itm_evaluation.get('position_size_multiplier', 1.0),
+                    'itm_reasons': itm_evaluation.get('reasons', []),
+                    'itm_warnings': itm_evaluation.get('warnings', []),
+                    'itm_raw_values': itm_evaluation.get('raw_values', {})
+                })
+                
+                # Add ITM reasons to rationale
+                if itm_evaluation.get('reasons'):
+                    rationale += f" | ITM: {', '.join(itm_evaluation['reasons'][:2])}"
 
             self.signal_history.append({'signal': signal, 'confidence': confidence, 'regime': current_regime})
             metadata['signal_history'] = list(self.signal_history)[-5:]

@@ -26,7 +26,8 @@ def get_optimal_position_size(
     kelly_multiplier: float = 0.3,
     current_volatility: Optional[float] = None,
     target_volatility: float = 0.20,
-    regime_risk_scale: float = 1.0,  # New: Regime-based scaling factor
+    regime_risk_scale: float = 1.0,  # Regime-based scaling factor
+    itm_position_multiplier: float = 1.0,  # NEW: ITM feature-based position multiplier
 ) -> Dict[str, float]:
     """
     Kelly Criterion with confidence adjustment, risk caps, and Volatility Targeting.
@@ -53,8 +54,11 @@ def get_optimal_position_size(
     # Apply Fractional Kelly Multiplier (Recommendation: 0.3 to 0.5)
     adjusted_fraction = kelly_fraction * ml_confidence * kelly_multiplier
     
-    # Apply Regime Scaling (New Feature)
+    # Apply Regime Scaling
     adjusted_fraction *= regime_risk_scale
+    
+    # Apply ITM Position Multiplier (NEW - based on reverse engineering)
+    adjusted_fraction *= itm_position_multiplier
     
     # Volatility Targeting
     # If market is 2x more volatile than target, cut size by half.

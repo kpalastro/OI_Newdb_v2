@@ -42,6 +42,9 @@ class WalkForwardConfig:
     rl_use_ensemble: bool = True
     rl_algorithm: str = "ENSEMBLE"
     
+    # Swing ensemble configuration
+    use_swing_ensemble: bool = True
+    
     # Model retraining options
     retrain_each_segment: bool = True  # Retrain model for each segment
     model_params: Optional[Dict] = None  # Fixed model params (if not retraining)
@@ -276,7 +279,8 @@ class WalkForwardTester:
             max_risk_per_trade=self.config.max_risk_per_trade,
             use_rl=self.config.use_rl,
             rl_use_ensemble=self.config.rl_use_ensemble,
-            rl_algorithm=self.config.rl_algorithm
+            rl_algorithm=self.config.rl_algorithm,
+            use_swing_ensemble=self.config.use_swing_ensemble
         )
         
         # Run backtest

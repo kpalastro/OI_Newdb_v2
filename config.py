@@ -151,6 +151,9 @@ class AppConfig:
     rl_dqn_model_path: str = field(default_factory=lambda: os.getenv('OI_TRACKER_RL_DQN_MODEL_PATH', 'models/rl_dqn_model.zip'))
     rl_use_ensemble: bool = field(default_factory=lambda: _get_env_bool('OI_TRACKER_RL_USE_ENSEMBLE', True))
     
+    # Swing Ensemble Configuration
+    use_swing_ensemble: bool = field(default_factory=lambda: _get_env_bool('OI_TRACKER_USE_SWING_ENSEMBLE', True))
+    
     # End-of-Day Position Management
     auto_exec_close_all_positions_eod: bool = field(default_factory=lambda: _get_env_bool('OI_TRACKER_AUTO_EXEC_CLOSE_ALL_POSITIONS_EOD', True))
     auto_exec_eod_exit_time_hour: int = field(default_factory=lambda: _get_env_int('OI_TRACKER_AUTO_EXEC_EOD_EXIT_TIME_HOUR', 15))

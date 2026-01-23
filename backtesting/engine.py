@@ -65,6 +65,8 @@ class BacktestConfig:
     use_rl: bool = False
     rl_use_ensemble: bool = False
     rl_algorithm: str = "PPO"
+    # Swing ensemble configuration
+    use_swing_ensemble: bool = True
 
     def __post_init__(self) -> None:
         self.start = _ensure_date(self.start)
@@ -137,7 +139,8 @@ class BacktestEngine:
                 self.router.routing_mode = 'ensemble'
         else:
             self.router = None
-        self.signal_engine = MLSignalGenerator(config.exchange)
+        # Pass swing ensemble config to signal engine
+        self.signal_engine = MLSignalGenerator(config.exchange, use_swing_ensemble=config.use_swing_ensemble)
 
     def run(self) -> BacktestResult:
         frame = self._prepare_frame()
