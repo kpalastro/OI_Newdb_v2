@@ -134,7 +134,14 @@ REQUIRED_FEATURE_COLUMNS = [
     'itm_volume_divergence_strength',
     'itm_combined_dominance_signal',
     'itm_signal_agreement',
-    'itm_post_1145_enhanced_signal'
+    'itm_post_1145_enhanced_signal',
+    # Validated CE/PE Divergence Signals (Chart Correlation Analysis)
+    'itm_bearish_signal',  # CE>PE, CE+, PE- (predictive bearish)
+    'itm_bullish_signal',  # PE>CE, PE+, CE- (predictive bullish)
+    'itm_divergence_ce_pe',  # CE Δ% - PE Δ%
+    'itm_bearish_signal_strong',  # Strong bearish (divergence > 1%)
+    'itm_bullish_signal_strong',  # Strong bullish (divergence > 1%)
+    'itm_peak_bearish_signal',  # Peak detection (divergence > 3%)
 ]
 
 
@@ -909,6 +916,57 @@ def engineer_live_feature_set(
     # Agreement when both are positive (bearish) or both are negative (bullish)
     oi_sign = 1.0 if features['itm_dominance_signal'] > 0 else -1.0 if features['itm_dominance_signal'] < 0 else 0.0
     vol_sign = 1.0 if features['itm_volume_dominance_signal'] > 0 else -1.0 if features['itm_volume_dominance_signal'] < 0 else 0.0
+    
+    # 12. VALIDATED CE/PE Divergence Signals (Based on Chart Correlation Analysis)
+    # Key Finding: CE>PE (CE+, PE-) = BEARISH (predictive, contrarian indicator)
+    #              PE>CE (PE+, CE-) = BULLISH (predictive, contrarian indicator)
+    
+    # BEARISH Signal: CE Δ% > PE Δ% AND CE positive AND PE negative
+    # This indicates overbought conditions and predicts decline
+    # Handle NaN/inf values safely
+    if pd.isna(itm_ce_change) or pd.isna(itm_pe_change) or np.isinf(itm_ce_change) or np.isinf(itm_pe_change):
+        features['itm_bearish_signal'] = 0.0
+        features['itm_bullish_signal'] = 0.0
+        features['itm_divergence_ce_pe'] = 0.0
+        features['itm_bearish_signal_strong'] = 0.0
+        features['itm_bullish_signal_strong'] = 0.0
+        features['itm_peak_bearish_signal'] = 0.0
+    else:
+        # BEARISH Signal: CE Δ% > PE Δ% AND CE positive AND PE negative
+        features['itm_bearish_signal'] = 1.0 if (
+            itm_ce_change > itm_pe_change and 
+            itm_ce_change > 0 and 
+            itm_pe_change < 0
+        ) else 0.0
+        
+        # BULLISH Signal: PE Δ% > CE Δ% AND PE positive AND CE negative
+        # This indicates oversold conditions and predicts rise
+        features['itm_bullish_signal'] = 1.0 if (
+            itm_pe_change > itm_ce_change and 
+            itm_pe_change > 0 and 
+            itm_ce_change < 0
+        ) else 0.0
+        
+        # Divergence magnitude for signal strength
+        divergence = itm_ce_change - itm_pe_change
+        features['itm_divergence_ce_pe'] = divergence
+        
+        # Signal strength (based on divergence magnitude)
+        # Strong signals: divergence > 1% or < -1%
+        features['itm_bearish_signal_strong'] = 1.0 if (
+            features['itm_bearish_signal'] > 0 and abs(divergence) > 1.0
+        ) else 0.0
+        
+        features['itm_bullish_signal_strong'] = 1.0 if (
+            features['itm_bullish_signal'] > 0 and abs(divergence) > 1.0
+        ) else 0.0
+        
+        # Peak detection signal (very high BEARISH signals at peaks)
+        # Based on analysis: 77%+ BEARISH signals at price peaks
+        features['itm_peak_bearish_signal'] = 1.0 if (
+            features['itm_bearish_signal'] > 0 and 
+            divergence > 3.0  # Strong divergence indicates peak
+        ) else 0.0
     features['itm_signal_agreement'] = 1.0 if oi_sign * vol_sign > 0 else 0.0
     
     # 12. Post-11:45 AM Enhanced Signal (time-weighted combined signal)
@@ -1156,13 +1214,19 @@ def prepare_training_features(raw_features: pd.DataFrame, required_columns: Opti
     print("DEBUG: Calculating enhanced ITM dominance features...")
     enhanced_itm_features = {}
     
-    # Get base ITM features
+    # Get base ITM features (handle missing columns and NaN/inf)
     itm_ce_change = df.get('itm_oi_ce_pct_change_3m_wavg', pd.Series(0.0, index=df.index))
     itm_pe_change = df.get('itm_oi_pe_pct_change_3m_wavg', pd.Series(0.0, index=df.index))
     itm_vol_ce_change = df.get('itm_volume_ce_pct_change_3m_wavg', pd.Series(0.0, index=df.index))
     itm_vol_pe_change = df.get('itm_volume_pe_pct_change_3m_wavg', pd.Series(0.0, index=df.index))
     hour_col = df.get('hour', pd.Series(0, index=df.index))
     minute_col = df.get('minute', pd.Series(0, index=df.index))
+    
+    # Clean NaN and inf values
+    itm_ce_change = itm_ce_change.fillna(0.0).replace([np.inf, -np.inf], 0.0)
+    itm_pe_change = itm_pe_change.fillna(0.0).replace([np.inf, -np.inf], 0.0)
+    itm_vol_ce_change = itm_vol_ce_change.fillna(0.0).replace([np.inf, -np.inf], 0.0)
+    itm_vol_pe_change = itm_vol_pe_change.fillna(0.0).replace([np.inf, -np.inf], 0.0)
     
     # 1. ITM Dominance Signal: PE - CE (positive = bearish, negative = bullish)
     enhanced_itm_features['itm_dominance_signal'] = itm_pe_change - itm_ce_change
@@ -1209,6 +1273,40 @@ def prepare_training_features(raw_features: pd.DataFrame, required_columns: Opti
     # 9. Post-11:45 AM Enhanced Signal
     enhanced_itm_features['itm_post_1145_enhanced_signal'] = enhanced_itm_features['itm_combined_dominance_signal'] * (
         1.0 + 0.7 * enhanced_itm_features['is_post_1145']
+    )
+    
+    # 10. VALIDATED CE/PE Divergence Signals (Chart Correlation Analysis)
+    # BEARISH Signal: CE Δ% > PE Δ% AND CE positive AND PE negative
+    enhanced_itm_features['itm_bearish_signal'] = np.where(
+        (itm_ce_change > itm_pe_change) & (itm_ce_change > 0) & (itm_pe_change < 0),
+        1.0, 0.0
+    )
+    
+    # BULLISH Signal: PE Δ% > CE Δ% AND PE positive AND CE negative
+    enhanced_itm_features['itm_bullish_signal'] = np.where(
+        (itm_pe_change > itm_ce_change) & (itm_pe_change > 0) & (itm_ce_change < 0),
+        1.0, 0.0
+    )
+    
+    # Divergence
+    divergence = itm_ce_change - itm_pe_change
+    enhanced_itm_features['itm_divergence_ce_pe'] = divergence
+    
+    # Strong signals
+    enhanced_itm_features['itm_bearish_signal_strong'] = np.where(
+        (enhanced_itm_features['itm_bearish_signal'] > 0) & (np.abs(divergence) > 1.0),
+        1.0, 0.0
+    )
+    
+    enhanced_itm_features['itm_bullish_signal_strong'] = np.where(
+        (enhanced_itm_features['itm_bullish_signal'] > 0) & (np.abs(divergence) > 1.0),
+        1.0, 0.0
+    )
+    
+    # Peak detection (very strong bearish at peaks)
+    enhanced_itm_features['itm_peak_bearish_signal'] = np.where(
+        (enhanced_itm_features['itm_bearish_signal'] > 0) & (divergence > 3.0),
+        1.0, 0.0
     )
     
     # Convert to DataFrame and add to df

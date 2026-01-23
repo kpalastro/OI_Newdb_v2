@@ -158,6 +158,32 @@ class MLSignalGenerator:
                     # Apply ITM confidence multiplier
                     confidence = min(0.95, confidence * itm_evaluation.get('confidence_multiplier', 1.0))
                     
+                    # Apply validated BEARISH/BULLISH signals (Chart Correlation Analysis)
+                    # BEARISH signal (CE>PE, CE+, PE-) = contrarian bearish (predicts decline)
+                    # BULLISH signal (PE>CE, PE+, CE-) = contrarian bullish (predicts rise)
+                    if itm_evaluation.get('peak_detection', False):
+                        # Peak detection - very strong bearish signal
+                        if signal == 'BUY':
+                            signal = 'HOLD'  # Skip long trades at peaks
+                            confidence = 0.0
+                            rationale = f"Peak BEARISH Signal: {', '.join(itm_evaluation.get('warnings', []))}"
+                    elif itm_evaluation.get('bearish_signal', False):
+                        # BEARISH signal - reduce confidence for long trades
+                        if signal == 'BUY':
+                            confidence = confidence * 0.7  # Reduce confidence for long
+                            rationale += f" | BEARISH Signal (CE>PE, CE+, PE-)"
+                        elif signal == 'SELL':
+                            confidence = min(0.95, confidence * 1.1)  # Boost confidence for short
+                            rationale += f" | BEARISH Signal (CE>PE, CE+, PE-)"
+                    elif itm_evaluation.get('bullish_signal', False):
+                        # BULLISH signal - boost confidence for long trades
+                        if signal == 'BUY':
+                            confidence = min(0.95, confidence * 1.15)  # Boost confidence for long
+                            rationale += f" | BULLISH Signal (PE>CE, PE+, CE-)"
+                        elif signal == 'SELL':
+                            confidence = confidence * 0.8  # Reduce confidence for short
+                            rationale += f" | BULLISH Signal (PE>CE, PE+, CE-)"
+                    
                 except Exception as e:
                     logging.warning(f"[{self.exchange}] ITM evaluation failed: {e}")
                     itm_evaluation = None
@@ -258,7 +284,11 @@ class MLSignalGenerator:
                     'itm_position_multiplier': itm_evaluation.get('position_size_multiplier', 1.0),
                     'itm_reasons': itm_evaluation.get('reasons', []),
                     'itm_warnings': itm_evaluation.get('warnings', []),
-                    'itm_raw_values': itm_evaluation.get('raw_values', {})
+                    'itm_raw_values': itm_evaluation.get('raw_values', {}),
+                    # Validated CE/PE signals
+                    'itm_bearish_signal': itm_evaluation.get('bearish_signal', False),
+                    'itm_bullish_signal': itm_evaluation.get('bullish_signal', False),
+                    'itm_peak_detection': itm_evaluation.get('peak_detection', False)
                 })
                 
                 # Add ITM reasons to rationale
