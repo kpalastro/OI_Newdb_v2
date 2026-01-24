@@ -330,6 +330,36 @@ def initialize_database():
                     quantity_lots INTEGER,
                     pnl DOUBLE PRECISION,
                     constraint_violation BOOLEAN DEFAULT FALSE,
+                    metadata JSONB,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+                ''',
+                '''
+                CREATE TABLE IF NOT EXISTS option_return_backtest_trades (
+                    id SERIAL PRIMARY KEY,
+                    timestamp TIMESTAMP NOT NULL,
+                    exit_timestamp TIMESTAMP,
+                    exchange TEXT NOT NULL,
+                    option_type TEXT NOT NULL,
+                    option_symbol TEXT,
+                    horizon TEXT NOT NULL,
+                    predicted_return DOUBLE PRECISION,
+                    actual_return DOUBLE PRECISION,
+                    predicted_ce_return DOUBLE PRECISION,
+                    predicted_pe_return DOUBLE PRECISION,
+                    ce_confidence DOUBLE PRECISION,
+                    pe_confidence DOUBLE PRECISION,
+                    turning_point_prob DOUBLE PRECISION,
+                    recommendation TEXT,
+                    entry_price DOUBLE PRECISION,
+                    exit_price DOUBLE PRECISION,
+                    quantity_lots INTEGER,
+                    gross_pnl DOUBLE PRECISION,
+                    net_pnl DOUBLE PRECISION,
+                    transaction_cost DOUBLE PRECISION,
+                    confidence DOUBLE PRECISION,
+                    feature_payload JSONB,
+                    model_metadata JSONB,
                     created_at TIMESTAMP DEFAULT NOW()
                 )
                 ''',
@@ -1130,6 +1160,7 @@ def record_paper_trading_metric(
     quantity_lots: int,
     pnl: float | None,
     constraint_violation: bool,
+    metadata: dict | None = None,
 ) -> None:
     """
     Persist a single paper trading metric event to the database.
@@ -1139,28 +1170,165 @@ def record_paper_trading_metric(
             conn = get_db_connection()
             cursor = conn.cursor()
             ph = _get_placeholder()
+            # Check if metadata column exists
+            cursor.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = 'paper_trading_metrics' 
+                  AND column_name = 'metadata'
+            """)
+            has_metadata_col = cursor.fetchone() is not None
+            
+            if has_metadata_col:
+                import json
+                metadata_json = json.dumps(metadata) if metadata else None
+                cursor.execute(f'''
+                    INSERT INTO paper_trading_metrics (
+                        timestamp, exchange, executed, reason, signal,
+                        confidence, quantity_lots, pnl, constraint_violation,
+                        metadata, created_at
+                    ) VALUES ({', '.join([ph]*11)})
+                ''', (
+                    _coerce_iso_timestamp(timestamp),
+                    exchange,
+                    bool(executed),
+                    reason,
+                    signal,
+                    float(confidence) if confidence is not None else None,
+                    int(quantity_lots) if quantity_lots is not None else 0,
+                    float(pnl) if pnl is not None else None,
+                    bool(constraint_violation),
+                    metadata_json,
+                    _coerce_iso_timestamp(now_ist())
+                ))
+            else:
+                cursor.execute(f'''
+                    INSERT INTO paper_trading_metrics (
+                        timestamp, exchange, executed, reason, signal,
+                        confidence, quantity_lots, pnl, constraint_violation,
+                        created_at
+                    ) VALUES ({', '.join([ph]*10)})
+                ''', (
+                    _coerce_iso_timestamp(timestamp),
+                    exchange,
+                    bool(executed),
+                    reason,
+                    signal,
+                    float(confidence) if confidence is not None else None,
+                    int(quantity_lots) if quantity_lots is not None else 0,
+                    float(pnl) if pnl is not None else None,
+                    bool(constraint_violation),
+                    _coerce_iso_timestamp(now_ist())
+                ))
+            conn.commit()
+            release_db_connection(conn)
+        except Exception as exc:
+            logging.error("Failed to record paper trading metric: %s", exc, exc_info=True)
+            if 'conn' in locals():
+                release_db_connection(conn)
+
+
+def record_option_return_backtest_trade(
+    exchange: str,
+    timestamp: datetime,
+    option_type: str,
+    horizon: str,
+    predicted_return: float,
+    actual_return: float,
+    predicted_ce_return: float,
+    predicted_pe_return: float,
+    ce_confidence: float,
+    pe_confidence: float,
+    turning_point_prob: float,
+    recommendation: str,
+    entry_price: float,
+    exit_price: float,
+    quantity_lots: int,
+    gross_pnl: float,
+    net_pnl: float,
+    transaction_cost: float,
+    confidence: float,
+    exit_timestamp: datetime | None = None,
+    option_symbol: str | None = None,
+    feature_payload: dict | None = None,
+    model_metadata: dict | None = None,
+) -> None:
+    """
+    Record a single option return backtest trade to the database.
+    
+    Args:
+        exchange: Exchange name
+        timestamp: Trade timestamp
+        option_type: 'CE' or 'PE'
+        horizon: Time horizon ('3m', '5m', '10m', '15m')
+        predicted_return: Predicted return percentage
+        actual_return: Actual return percentage
+        predicted_ce_return: Predicted CE return percentage
+        predicted_pe_return: Predicted PE return percentage
+        ce_confidence: CE prediction confidence
+        pe_confidence: PE prediction confidence
+        turning_point_prob: Turning point probability
+        recommendation: Model recommendation
+        entry_price: Option entry price
+        exit_price: Option exit price
+        quantity_lots: Number of lots traded
+        gross_pnl: Gross PnL
+        net_pnl: Net PnL (after costs)
+        transaction_cost: Transaction cost
+        confidence: Overall confidence
+        feature_payload: Features used for prediction (JSONB)
+        model_metadata: Additional model metadata (JSONB)
+    """
+    with db_lock:
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            ph = _get_placeholder()
+            
+            import json
+            feature_json = json.dumps(feature_payload) if feature_payload else None
+            model_json = json.dumps(model_metadata) if model_metadata else None
+            
             cursor.execute(f'''
-                INSERT INTO paper_trading_metrics (
-                    timestamp, exchange, executed, reason, signal,
-                    confidence, quantity_lots, pnl, constraint_violation,
-                    created_at
-                ) VALUES ({', '.join([ph]*10)})
+                INSERT INTO option_return_backtest_trades (
+                    timestamp, exit_timestamp, exchange, option_type, option_symbol, horizon,
+                    predicted_return, actual_return,
+                    predicted_ce_return, predicted_pe_return,
+                    ce_confidence, pe_confidence, turning_point_prob,
+                    recommendation, entry_price, exit_price,
+                    quantity_lots, gross_pnl, net_pnl, transaction_cost,
+                    confidence, feature_payload, model_metadata, created_at
+                ) VALUES ({', '.join([ph]*24)})
             ''', (
                 _coerce_iso_timestamp(timestamp),
+                _coerce_iso_timestamp(exit_timestamp) if exit_timestamp else None,
                 exchange,
-                bool(executed),
-                reason,
-                signal,
-                float(confidence) if confidence is not None else None,
+                option_type,
+                option_symbol,
+                horizon,
+                float(predicted_return) if predicted_return is not None else None,
+                float(actual_return) if actual_return is not None else None,
+                float(predicted_ce_return) if predicted_ce_return is not None else None,
+                float(predicted_pe_return) if predicted_pe_return is not None else None,
+                float(ce_confidence) if ce_confidence is not None else None,
+                float(pe_confidence) if pe_confidence is not None else None,
+                float(turning_point_prob) if turning_point_prob is not None else None,
+                recommendation,
+                float(entry_price) if entry_price is not None else None,
+                float(exit_price) if exit_price is not None else None,
                 int(quantity_lots) if quantity_lots is not None else 0,
-                float(pnl) if pnl is not None else None,
-                bool(constraint_violation),
+                float(gross_pnl) if gross_pnl is not None else None,
+                float(net_pnl) if net_pnl is not None else None,
+                float(transaction_cost) if transaction_cost is not None else None,
+                float(confidence) if confidence is not None else None,
+                feature_json,
+                model_json,
                 _coerce_iso_timestamp(now_ist())
             ))
             conn.commit()
             release_db_connection(conn)
         except Exception as exc:
-            logging.error("Failed to record paper trading metric: %s", exc, exc_info=True)
+            logging.error(f"Error recording option return backtest trade: {exc}", exc_info=True)
             if 'conn' in locals():
                 release_db_connection(conn)
 
