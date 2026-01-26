@@ -25,7 +25,7 @@ except ImportError:
 
 # ITM Feature Evaluator (optional)
 try:
-    from utils.itm_feature_evaluator import evaluate_itm_features
+    from utils.itm_feature_evaluator import evaluate_itm_features, evaluate_for_auto_trading
     ITM_EVALUATOR_AVAILABLE = True
 except ImportError:
     ITM_EVALUATOR_AVAILABLE = False
@@ -127,6 +127,16 @@ class AutoExecutor:
         """
         try:
             collector = get_metrics_collector(self.exchange)
+            # Extract ITM metadata from signal metadata
+            itm_metadata = {}
+            if hasattr(signal, 'metadata') and signal.metadata:
+                # Extract ITM-related metadata
+                for key in ['itm_bearish_signal', 'itm_bullish_signal', 'itm_peak_detection',
+                           'itm_score', 'itm_confidence_multiplier', 'itm_position_multiplier',
+                           'itm_rationale', 'itm_reasons', 'itm_warnings']:
+                    if key in signal.metadata:
+                        itm_metadata[key] = signal.metadata[key]
+            
             collector.record_paper_trading(
                 executed=executed,
                 reason=reason,
@@ -135,6 +145,7 @@ class AutoExecutor:
                 quantity_lots=quantity_lots,
                 pnl=pnl,
                 constraint_violation=constraint_violation,
+                metadata=itm_metadata if itm_metadata else None,
             )
         except Exception as exc:
             LOGGER.debug(f"[{self.exchange}] Paper trading metrics failed: {exc}")
@@ -268,10 +279,43 @@ class AutoExecutor:
         
         # ITM Feature Check (Safety Net - already filtered in ml_core, but double-check)
         # This is a safety net in case features_dict is available
+        # UPDATED: Now includes bottom detection logic (Jan 2026 Analysis)
+        itm_position_multiplier = 1.0  # Default position multiplier
         if ITM_EVALUATOR_AVAILABLE and hasattr(signal, 'features_dict') and signal.features_dict:
             try:
-                itm_eval = evaluate_itm_features(signal.features_dict)
-                if itm_eval.get('should_skip_trade', False):
+                # Use the comprehensive auto trading evaluation with exchange-specific thresholds
+                itm_auto_eval = evaluate_for_auto_trading(signal.features_dict, exchange=self.exchange)
+                itm_eval = itm_auto_eval.get('raw_evaluation', {})
+                
+                # Apply action-based decisions
+                action = itm_auto_eval.get('action', 'NEUTRAL')
+                
+                if action == 'SKIP_LONG' and signal.signal == 'BUY':
+                    result = ExecutionResult(
+                        executed=False,
+                        reason=f"ITM Filter (Peak/Bearish): {itm_auto_eval.get('reason', 'ITM conditions not optimal')}"
+                    )
+                    self._record_paper_trade_metric(
+                        executed=False,
+                        reason=result.reason,
+                        signal=signal,
+                        quantity_lots=0,
+                        pnl=None,
+                        constraint_violation=False,
+                    )
+                    LOGGER.info(f"[{self.exchange}] Trade skipped due to ITM peak/bearish signal")
+                    return result
+                
+                # Apply position multiplier based on ITM analysis
+                itm_position_multiplier = itm_auto_eval.get('position_multiplier', 1.0)
+                
+                # Log bottom detection events
+                if action == 'ENTER_LONG':
+                    bottom_type = itm_auto_eval.get('signals', {}).get('bottom_type', 'unknown')
+                    LOGGER.info(f"[{self.exchange}] Bottom signal detected (Type: {bottom_type}), boosting position")
+                
+                # Fallback to old skip logic for other cases
+                if itm_eval.get('should_skip_trade', False) and action != 'ENTER_LONG':
                     result = ExecutionResult(
                         executed=False,
                         reason=f"ITM Filter: {', '.join(itm_eval.get('warnings', ['ITM conditions not optimal']))}"
@@ -366,8 +410,22 @@ class AutoExecutor:
             )
             return result
         
+        # Apply ITM position multiplier (from bottom/peak detection analysis)
+        # Bottom signals: multiplier > 1.0 (increase position)
+        # Peak signals: multiplier < 1.0 (decrease position)
+        adjusted_lots = int(recommended_lots * itm_position_multiplier)
+        if adjusted_lots != recommended_lots:
+            LOGGER.info(
+                f"[{self.exchange}] Position adjusted by ITM analysis: "
+                f"{recommended_lots} -> {adjusted_lots} lots (multiplier: {itm_position_multiplier:.2f})"
+            )
+        
         # Cap position size
-        quantity_lots = min(recommended_lots, self.config.max_position_size_lots)
+        quantity_lots = min(adjusted_lots, self.config.max_position_size_lots)
+        
+        # Ensure at least 1 lot if the signal is valid
+        if quantity_lots <= 0 and recommended_lots > 0:
+            quantity_lots = 1  # Minimum 1 lot
         
         # Advanced Risk Management Check (if enabled)
         if self.advanced_risk_manager and portfolio_state is not None:

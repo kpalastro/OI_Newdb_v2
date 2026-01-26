@@ -25,6 +25,14 @@ from models.multi_horizon_ensemble import MultiHorizonEnsemble
 from regime_analysis import MarketRegimeDetector
 from feature_engineering import REQUIRED_FEATURE_COLUMNS
 
+# Option Return Predictor (optional - only import if available)
+try:
+    from models.option_return_predictor import OptionReturnPredictor
+    OPTION_RETURN_PREDICTOR_AVAILABLE = True
+except ImportError:
+    OPTION_RETURN_PREDICTOR_AVAILABLE = False
+    logging.warning("Option return predictor not available. Option return predictions disabled.")
+
 # ITM Feature Evaluator (optional - only import if available)
 try:
     from utils.itm_feature_evaluator import evaluate_itm_features, create_itm_optimal_range_features
@@ -58,6 +66,17 @@ class MLSignalGenerator:
 
         # Phase 5: Enhanced Regime Detector
         self.regime_detector = MarketRegimeDetector(exchange)
+        
+        # Option Return Predictor (NEW - for direct option return prediction)
+        self.option_return_predictor = None
+        if OPTION_RETURN_PREDICTOR_AVAILABLE:
+            try:
+                self.option_return_predictor = OptionReturnPredictor(exchange)
+                if self.option_return_predictor.models_loaded:
+                    logging.info(f"[{exchange}] Option return predictor loaded successfully")
+            except Exception as e:
+                logging.warning(f"[{exchange}] Failed to load option return predictor: {e}")
+                self.option_return_predictor = None
         
         self.strategy_metrics = {
             'win_rate': 0.58,
@@ -133,13 +152,15 @@ class MLSignalGenerator:
             # --- ITM Feature Enforcement (NEW) ---
             # Evaluate ITM features and apply filters/multipliers based on reverse engineering
             itm_evaluation = None
+            rationale = f"Horizon {horizon}"  # Initialize base rationale before ITM evaluation
             if ITM_EVALUATOR_AVAILABLE:
                 try:
                     # Add ITM optimal range features to features_dict for evaluation
                     itm_optimal_features = create_itm_optimal_range_features(features_dict)
                     features_dict_with_optimal = {**features_dict, **itm_optimal_features}
                     
-                    itm_evaluation = evaluate_itm_features(features_dict_with_optimal)
+                    # Pass exchange for exchange-specific ITM thresholds (BSE vs NSE differ!)
+                    itm_evaluation = evaluate_itm_features(features_dict_with_optimal, exchange=self.exchange)
                     
                     # Apply ITM skip filter (CRITICAL)
                     if itm_evaluation.get('should_skip_trade', False):
@@ -184,6 +205,48 @@ class MLSignalGenerator:
                             confidence = confidence * 0.8  # Reduce confidence for short
                             rationale += f" | BULLISH Signal (PE>CE, PE+, CE-)"
                     
+                    # --- NEW: Bottom Detection Logic (Jan 2026 Analysis) ---
+                    # Bottom signals have STRONG correlation with profitability
+                    # Correlation with PnL: +0.399, with Win Rate: +0.575
+                    if itm_evaluation.get('bottom_detection', False):
+                        bottom_type = itm_evaluation.get('bottom_type', 'unknown')
+                        divergence = itm_evaluation.get('raw_values', {}).get('divergence', 0)
+                        
+                        if signal == 'HOLD':
+                            # Convert HOLD to BUY at bottoms
+                            signal = 'BUY'
+                            if bottom_type == 'type1' and divergence > 15:
+                                confidence = 0.75  # Very strong bottom
+                                rationale = f"Bottom Signal (Type 1 Very Strong): CE accumulation + PE unwinding, Div={divergence:.1f}%"
+                            elif bottom_type == 'type1':
+                                confidence = 0.70  # Strong accumulation bottom
+                                rationale = f"Bottom Signal (Type 1): CE accumulation + PE unwinding, Div={divergence:.1f}%"
+                            else:
+                                confidence = 0.65  # Traditional bullish bottom
+                                rationale = f"Bottom Signal (Type 2): Oversold condition, Div={divergence:.1f}%"
+                        elif signal == 'BUY':
+                            # Boost existing BUY signal at bottoms
+                            if bottom_type == 'type1' and divergence > 15:
+                                confidence = min(0.95, confidence * 1.25)  # +25% confidence
+                                rationale += f" | VERY STRONG BOTTOM (Type 1, Div={divergence:.1f}%)"
+                            elif bottom_type == 'type1':
+                                confidence = min(0.95, confidence * 1.20)  # +20% confidence
+                                rationale += f" | STRONG BOTTOM (Type 1, Div={divergence:.1f}%)"
+                            else:
+                                confidence = min(0.95, confidence * 1.15)  # +15% confidence
+                                rationale += f" | BOTTOM (Type 2, Div={divergence:.1f}%)"
+                        elif signal == 'SELL':
+                            # Reduce SELL confidence at bottoms (contrarian)
+                            confidence = confidence * 0.7  # -30% confidence
+                            rationale += f" | CAUTION: Bottom detected, reducing SELL confidence"
+                    
+                    # Market Regime Awareness
+                    market_regime = itm_evaluation.get('market_regime', 'unknown')
+                    if market_regime == 'trending' and signal == 'BUY':
+                        # In trending markets, be more cautious with mean-reversion
+                        confidence = max(0.5, confidence * 0.9)  # Slight reduction
+                        rationale += f" | Trending regime detected"
+                    
                 except Exception as e:
                     logging.warning(f"[{self.exchange}] ITM evaluation failed: {e}")
                     itm_evaluation = None
@@ -191,8 +254,6 @@ class MLSignalGenerator:
             # --- ITM OI Divergence Boost (Rule-Based) ---
             # Explicitly boost signal confidence if ITM OI shows strong directional divergence
             # This handles the specific "Red Market" scenario where models might be conservative.
-            
-            rationale = f"Horizon {horizon}"  # Initialize base rationale
             
             bearish_div = features_dict.get('itm_oi_bearish_divergence', 0.0)
             bullish_div = features_dict.get('itm_oi_bullish_divergence', 0.0)
@@ -294,6 +355,52 @@ class MLSignalGenerator:
                 # Add ITM reasons to rationale
                 if itm_evaluation.get('reasons'):
                     rationale += f" | ITM: {', '.join(itm_evaluation['reasons'][:2])}"
+            
+            # --- Option Return Prediction (NEW) ---
+            # Use option return models to enhance/override signal if available
+            option_return_prediction = None
+            if self.option_return_predictor and self.option_return_predictor.models_loaded:
+                try:
+                    # Get best horizon prediction
+                    best_horizon, option_result = self.option_return_predictor.get_best_horizon(feature_df)
+                    
+                    option_return_prediction = {
+                        'horizon': best_horizon,
+                        'ce_return': option_result['ce_return'],
+                        'pe_return': option_result['pe_return'],
+                        'ce_confidence': option_result['ce_confidence'],
+                        'pe_confidence': option_result['pe_confidence'],
+                        'turning_point_prob': option_result['turning_point_prob'],
+                        'recommendation': option_result['recommendation']
+                    }
+                    
+                    # If turning point probability is high, reduce confidence
+                    if option_result['turning_point_prob'] > 0.7:
+                        confidence = confidence * 0.5
+                        rationale += f" | Turning Point Risk ({option_result['turning_point_prob']:.1%})"
+                    
+                    # Override signal if option return recommendation is strong
+                    if option_result['recommendation'] in ['BUY_CE', 'BUY_PE']:
+                        if option_result['ce_return'] > 2.0 or option_result['pe_return'] > 2.0:
+                            # Strong positive return prediction
+                            if signal == 'HOLD' and confidence < 0.5:
+                                signal = 'BUY'
+                                confidence = min(0.8, option_result.get('ce_confidence', 0.5) or option_result.get('pe_confidence', 0.5))
+                                rationale = f"Option Return: {option_result['recommendation']} ({option_result['ce_return']:.2f}%/{option_result['pe_return']:.2f}%)"
+                    elif option_result['recommendation'] in ['SELL_CE', 'SELL_PE']:
+                        if option_result['ce_return'] < -2.0 or option_result['pe_return'] < -2.0:
+                            # Strong negative return prediction
+                            if signal == 'HOLD' and confidence < 0.5:
+                                signal = 'SELL'
+                                confidence = min(0.8, option_result.get('ce_confidence', 0.5) or option_result.get('pe_confidence', 0.5))
+                                rationale = f"Option Return: {option_result['recommendation']} ({option_result['ce_return']:.2f}%/{option_result['pe_return']:.2f}%)"
+                    
+                    # Add option return metadata
+                    metadata['option_return_prediction'] = option_return_prediction
+                    
+                except Exception as e:
+                    logging.warning(f"[{self.exchange}] Option return prediction failed: {e}")
+                    option_return_prediction = None
 
             self.signal_history.append({'signal': signal, 'confidence': confidence, 'regime': current_regime})
             metadata['signal_history'] = list(self.signal_history)[-5:]

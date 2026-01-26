@@ -1,0 +1,603 @@
+{
+  "analysis_date": "2026-01-26T12:15:09.407233",
+  "days_analyzed": 60,
+  "exchange": "BSE",
+  "total_trades": 2803,
+  "trades_with_features": 131,
+  "analyses": {
+    "distributions": {
+      "itm_ce_delta_pct": {
+        "feature_name": "ITM CE \u0394%",
+        "overall": {
+          "mean": 17.18987586426973,
+          "median": 5.5951813563373936,
+          "std": 54.65474917562757,
+          "min": -15.522036347172815,
+          "max": 492.5010591921902
+        },
+        "winners": {
+          "mean": 22.138876370697258,
+          "median": 0.11990039589571759,
+          "std": 88.47345405316469,
+          "count": 44
+        },
+        "losers": {
+          "mean": 14.686933079409837,
+          "median": 6.2316401046820316,
+          "std": 24.14129058105327,
+          "count": 87
+        },
+        "difference": {
+          "mean_diff": 7.451943291287421,
+          "median_diff": -6.111739708786314
+        }
+      },
+      "itm_pe_delta_pct": {
+        "feature_name": "ITM PE \u0394%",
+        "overall": {
+          "mean": 1.0219053158256648,
+          "median": 0.0,
+          "std": 19.768123057295547,
+          "min": -50.42355584986553,
+          "max": 187.41408119202327
+        },
+        "winners": {
+          "mean": 7.890045770531183,
+          "median": 1.2367856514739215,
+          "std": 31.758180952305366,
+          "count": 44
+        },
+        "losers": {
+          "mean": -2.4516369831058613,
+          "median": -1.3249853697680207,
+          "std": 7.076790941502633,
+          "count": 87
+        },
+        "difference": {
+          "mean_diff": 10.341682753637045,
+          "median_diff": 2.5617710212419422
+        }
+      },
+      "itm_ce_vol_delta_pct": {
+        "feature_name": "ITM CE Vol \u0394%",
+        "overall": {
+          "mean": 16.65245582355625,
+          "median": 7.472965050232163,
+          "std": 22.321145956020633,
+          "min": -3.102384148119533,
+          "max": 72.28942023215473
+        },
+        "winners": {
+          "mean": -0.44319773544564756,
+          "median": 0.0,
+          "std": 1.1725909896161797,
+          "count": 7
+        },
+        "losers": {
+          "mean": 18.167260569290598,
+          "median": 7.472965050232163,
+          "std": 22.677928068405475,
+          "count": 79
+        },
+        "difference": {
+          "mean_diff": -18.610458304736245,
+          "median_diff": -7.472965050232163
+        }
+      },
+      "itm_pe_vol_delta_pct": {
+        "feature_name": "ITM PE Vol \u0394%",
+        "overall": {
+          "mean": -1.5823883832428896,
+          "median": -1.5294476404077915,
+          "std": 10.275311322102667,
+          "min": -17.93122547349253,
+          "max": 53.291598164479524
+        },
+        "winners": {
+          "mean": 12.881529168274392,
+          "median": 14.004948823991967,
+          "std": 19.55014698869705,
+          "count": 7
+        },
+        "losers": {
+          "mean": -2.8640013308456864,
+          "median": -2.2469622804245266,
+          "std": 8.075785320893166,
+          "count": 79
+        },
+        "difference": {
+          "mean_diff": 15.745530499120079,
+          "median_diff": 16.251911104416493
+        }
+      }
+    },
+    "correlations": {
+      "itm_ce_delta_pct": 0.040902601130540894,
+      "itm_pe_delta_pct": 0.20715463176596316,
+      "itm_ce_vol_delta_pct": -0.3209582759977234,
+      "itm_pe_vol_delta_pct": 0.5524472076521865
+    },
+    "optimal_ranges": {
+      "itm_ce_delta_pct": {
+        "feature_name": "ITM CE \u0394%",
+        "best_bucket": "Low",
+        "best_win_rate": 0.5769230769230769,
+        "optimal_range": [
+          -0.4488305201895652,
+          1.6395283915483592
+        ],
+        "bucket_analysis": {
+          "('is_winner', 'mean')": {
+            "Very Low": 0.37037037037037035,
+            "Low": 0.5769230769230769,
+            "Medium": 0.34615384615384615,
+            "High": 0.15384615384615385,
+            "Very High": 0.23076923076923078
+          },
+          "('is_winner', 'count')": {
+            "Very Low": 27,
+            "Low": 26,
+            "Medium": 26,
+            "High": 26,
+            "Very High": 26
+          },
+          "('itm_ce_delta_pct', 'mean')": {
+            "Very Low": -10.0104561332497,
+            "Low": 0.4411887744751558,
+            "Medium": 4.819600148432337,
+            "High": 13.922208999065175,
+            "Very High": 77.82300414791492
+          },
+          "('itm_ce_delta_pct', 'min')": {
+            "Very Low": -15.522036347172815,
+            "Low": -0.4488305201895652,
+            "Medium": 3.5168223048280054,
+            "High": 6.334209708422861,
+            "Very High": 23.368328415393886
+          },
+          "('itm_ce_delta_pct', 'max')": {
+            "Very Low": -0.6471809129723248,
+            "Low": 1.6395283915483592,
+            "Medium": 6.2316401046820316,
+            "High": 22.09252786038882,
+            "Very High": 492.5010591921902
+          }
+        }
+      },
+      "itm_pe_delta_pct": {
+        "feature_name": "ITM PE \u0394%",
+        "best_bucket": "Very High",
+        "best_win_rate": 0.5454545454545454,
+        "optimal_range": [
+          3.4976160575699407,
+          187.41408119202327
+        ],
+        "bucket_analysis": {
+          "('is_winner', 'mean')": {
+            "Very Low": 0.20689655172413793,
+            "Low": 0.038461538461538464,
+            "Medium": 0.5357142857142857,
+            "High": 0.38461538461538464,
+            "Very High": 0.5454545454545454
+          },
+          "('is_winner', 'count')": {
+            "Very Low": 29,
+            "Low": 26,
+            "Medium": 28,
+            "High": 26,
+            "Very High": 22
+          },
+          "('itm_pe_delta_pct', 'mean')": {
+            "Very Low": -12.146185364143399,
+            "Low": -3.4674450447079144,
+            "Medium": 0.24779594007375733,
+            "High": 2.5316466582160526,
+            "Very High": 22.886429257274724
+          },
+          "('itm_pe_delta_pct', 'min')": {
+            "Very Low": -50.42355584986553,
+            "Low": -4.761934865954157,
+            "Medium": -0.7842118353772652,
+            "High": 1.379294572712892,
+            "Very High": 3.4976160575699407
+          },
+          "('itm_pe_delta_pct', 'max')": {
+            "Very Low": -5.3582642359314665,
+            "Low": -1.1465192142542897,
+            "Medium": 1.2277925538802277,
+            "High": 3.4219315983378924,
+            "Very High": 187.41408119202327
+          }
+        }
+      },
+      "itm_ce_vol_delta_pct": {
+        "feature_name": "ITM CE Vol \u0394%",
+        "best_bucket": "Very Low",
+        "best_win_rate": 0.2916666666666667,
+        "optimal_range": [
+          -3.102384148119533,
+          0.0
+        ],
+        "bucket_analysis": {
+          "('is_winner', 'mean')": {
+            "Very Low": 0.2916666666666667,
+            "Low": 0.0,
+            "Medium": 0.0,
+            "High": 0.0,
+            "Very High": 0.0
+          },
+          "('is_winner', 'count')": {
+            "Very Low": 24,
+            "Low": 12,
+            "Medium": 17,
+            "High": 16,
+            "Very High": 17
+          },
+          "('itm_ce_vol_delta_pct', 'mean')": {
+            "Very Low": -0.1292660061716472,
+            "Low": 1.9054212890513356,
+            "Medium": 8.007408132920958,
+            "High": 18.216896797927422,
+            "Very High": 57.926602498755635
+          },
+          "('itm_ce_vol_delta_pct', 'min')": {
+            "Very Low": -3.102384148119533,
+            "Low": 1.49400442119831,
+            "Medium": 3.1160655496167733,
+            "High": 14.408575832199546,
+            "Very High": 41.57872587127447
+          },
+          "('itm_ce_vol_delta_pct', 'max')": {
+            "Very Low": 0.0,
+            "Low": 2.29715560083985,
+            "Medium": 14.32508462209773,
+            "High": 29.735421225340975,
+            "Very High": 72.28942023215473
+          }
+        }
+      },
+      "itm_pe_vol_delta_pct": {
+        "feature_name": "ITM PE Vol \u0394%",
+        "best_bucket": "Very High",
+        "best_win_rate": 0.23529411764705882,
+        "optimal_range": [
+          3.7852826935334085,
+          53.291598164479524
+        ],
+        "bucket_analysis": {
+          "('is_winner', 'mean')": {
+            "Very Low": 0.0,
+            "Low": 0.05555555555555555,
+            "Medium": 0.11764705882352941,
+            "High": 0.0,
+            "Very High": 0.23529411764705882
+          },
+          "('is_winner', 'count')": {
+            "Very Low": 18,
+            "Low": 18,
+            "Medium": 17,
+            "High": 16,
+            "Very High": 17
+          },
+          "('itm_pe_vol_delta_pct', 'mean')": {
+            "Very Low": -13.715423011313113,
+            "Low": -4.956447414425508,
+            "Medium": -1.4494856359367443,
+            "High": 1.8915744326528927,
+            "Very High": 11.4343724466403
+          },
+          "('itm_pe_vol_delta_pct', 'min')": {
+            "Very Low": -17.93122547349253,
+            "Low": -5.603888174313759,
+            "Medium": -4.421821794912097,
+            "High": 1.1700250844047067,
+            "Very High": 3.7852826935334085
+          },
+          "('itm_pe_vol_delta_pct', 'max')": {
+            "Very Low": -5.6332494866760126,
+            "Low": -4.423415174153134,
+            "Medium": 0.43113678130193406,
+            "High": 3.779501905898101,
+            "Very High": 53.291598164479524
+          }
+        }
+      }
+    },
+    "combinations": {
+      "oi_divergence": {
+        "positive_divergence": {
+          "count": 42,
+          "win_rate": 0.2857142857142857,
+          "avg_pnl": -1006.2738095238097
+        },
+        "negative_divergence": {
+          "count": 74,
+          "win_rate": 0.2702702702702703,
+          "avg_pnl": -1080.2986486486486
+        }
+      },
+      "volume_divergence": {
+        "positive_divergence": {
+          "count": 21,
+          "win_rate": 0.19047619047619047,
+          "avg_pnl": -1115.6857142857145
+        },
+        "negative_divergence": {
+          "count": 61,
+          "win_rate": 0.01639344262295082,
+          "avg_pnl": -1970.51475409836
+        }
+      },
+      "signal_agreement": {
+        "agreement": {
+          "count": 110,
+          "win_rate": 0.32727272727272727,
+          "avg_pnl": -852.7945454545454
+        },
+        "disagreement": {
+          "count": 21,
+          "win_rate": 0.38095238095238093,
+          "avg_pnl": -896.8619047619051
+        }
+      }
+    }
+  },
+  "summary": {
+    "feature_importance_ranking": [
+      {
+        "feature": "ITM PE Vol \u0394%",
+        "importance_score": 1.5323651491595758,
+        "mean_diff": 15.745530499120079,
+        "interpretation": "Higher in winners"
+      },
+      {
+        "feature": "ITM CE Vol \u0394%",
+        "importance_score": 0.8337590510650926,
+        "mean_diff": -18.610458304736245,
+        "interpretation": "Lower in winners"
+      },
+      {
+        "feature": "ITM PE \u0394%",
+        "importance_score": 0.5231494259982845,
+        "mean_diff": 10.341682753637045,
+        "interpretation": "Higher in winners"
+      },
+      {
+        "feature": "ITM CE \u0394%",
+        "importance_score": 0.13634575709048796,
+        "mean_diff": 7.451943291287421,
+        "interpretation": "Higher in winners"
+      }
+    ],
+    "optimal_ranges": {
+      "itm_ce_delta_pct": {
+        "feature_name": "ITM CE \u0394%",
+        "best_bucket": "Low",
+        "best_win_rate": 0.5769230769230769,
+        "optimal_range": [
+          -0.4488305201895652,
+          1.6395283915483592
+        ],
+        "bucket_analysis": {
+          "('is_winner', 'mean')": {
+            "Very Low": 0.37037037037037035,
+            "Low": 0.5769230769230769,
+            "Medium": 0.34615384615384615,
+            "High": 0.15384615384615385,
+            "Very High": 0.23076923076923078
+          },
+          "('is_winner', 'count')": {
+            "Very Low": 27,
+            "Low": 26,
+            "Medium": 26,
+            "High": 26,
+            "Very High": 26
+          },
+          "('itm_ce_delta_pct', 'mean')": {
+            "Very Low": -10.0104561332497,
+            "Low": 0.4411887744751558,
+            "Medium": 4.819600148432337,
+            "High": 13.922208999065175,
+            "Very High": 77.82300414791492
+          },
+          "('itm_ce_delta_pct', 'min')": {
+            "Very Low": -15.522036347172815,
+            "Low": -0.4488305201895652,
+            "Medium": 3.5168223048280054,
+            "High": 6.334209708422861,
+            "Very High": 23.368328415393886
+          },
+          "('itm_ce_delta_pct', 'max')": {
+            "Very Low": -0.6471809129723248,
+            "Low": 1.6395283915483592,
+            "Medium": 6.2316401046820316,
+            "High": 22.09252786038882,
+            "Very High": 492.5010591921902
+          }
+        }
+      },
+      "itm_pe_delta_pct": {
+        "feature_name": "ITM PE \u0394%",
+        "best_bucket": "Very High",
+        "best_win_rate": 0.5454545454545454,
+        "optimal_range": [
+          3.4976160575699407,
+          187.41408119202327
+        ],
+        "bucket_analysis": {
+          "('is_winner', 'mean')": {
+            "Very Low": 0.20689655172413793,
+            "Low": 0.038461538461538464,
+            "Medium": 0.5357142857142857,
+            "High": 0.38461538461538464,
+            "Very High": 0.5454545454545454
+          },
+          "('is_winner', 'count')": {
+            "Very Low": 29,
+            "Low": 26,
+            "Medium": 28,
+            "High": 26,
+            "Very High": 22
+          },
+          "('itm_pe_delta_pct', 'mean')": {
+            "Very Low": -12.146185364143399,
+            "Low": -3.4674450447079144,
+            "Medium": 0.24779594007375733,
+            "High": 2.5316466582160526,
+            "Very High": 22.886429257274724
+          },
+          "('itm_pe_delta_pct', 'min')": {
+            "Very Low": -50.42355584986553,
+            "Low": -4.761934865954157,
+            "Medium": -0.7842118353772652,
+            "High": 1.379294572712892,
+            "Very High": 3.4976160575699407
+          },
+          "('itm_pe_delta_pct', 'max')": {
+            "Very Low": -5.3582642359314665,
+            "Low": -1.1465192142542897,
+            "Medium": 1.2277925538802277,
+            "High": 3.4219315983378924,
+            "Very High": 187.41408119202327
+          }
+        }
+      },
+      "itm_ce_vol_delta_pct": {
+        "feature_name": "ITM CE Vol \u0394%",
+        "best_bucket": "Very Low",
+        "best_win_rate": 0.2916666666666667,
+        "optimal_range": [
+          -3.102384148119533,
+          0.0
+        ],
+        "bucket_analysis": {
+          "('is_winner', 'mean')": {
+            "Very Low": 0.2916666666666667,
+            "Low": 0.0,
+            "Medium": 0.0,
+            "High": 0.0,
+            "Very High": 0.0
+          },
+          "('is_winner', 'count')": {
+            "Very Low": 24,
+            "Low": 12,
+            "Medium": 17,
+            "High": 16,
+            "Very High": 17
+          },
+          "('itm_ce_vol_delta_pct', 'mean')": {
+            "Very Low": -0.1292660061716472,
+            "Low": 1.9054212890513356,
+            "Medium": 8.007408132920958,
+            "High": 18.216896797927422,
+            "Very High": 57.926602498755635
+          },
+          "('itm_ce_vol_delta_pct', 'min')": {
+            "Very Low": -3.102384148119533,
+            "Low": 1.49400442119831,
+            "Medium": 3.1160655496167733,
+            "High": 14.408575832199546,
+            "Very High": 41.57872587127447
+          },
+          "('itm_ce_vol_delta_pct', 'max')": {
+            "Very Low": 0.0,
+            "Low": 2.29715560083985,
+            "Medium": 14.32508462209773,
+            "High": 29.735421225340975,
+            "Very High": 72.28942023215473
+          }
+        }
+      },
+      "itm_pe_vol_delta_pct": {
+        "feature_name": "ITM PE Vol \u0394%",
+        "best_bucket": "Very High",
+        "best_win_rate": 0.23529411764705882,
+        "optimal_range": [
+          3.7852826935334085,
+          53.291598164479524
+        ],
+        "bucket_analysis": {
+          "('is_winner', 'mean')": {
+            "Very Low": 0.0,
+            "Low": 0.05555555555555555,
+            "Medium": 0.11764705882352941,
+            "High": 0.0,
+            "Very High": 0.23529411764705882
+          },
+          "('is_winner', 'count')": {
+            "Very Low": 18,
+            "Low": 18,
+            "Medium": 17,
+            "High": 16,
+            "Very High": 17
+          },
+          "('itm_pe_vol_delta_pct', 'mean')": {
+            "Very Low": -13.715423011313113,
+            "Low": -4.956447414425508,
+            "Medium": -1.4494856359367443,
+            "High": 1.8915744326528927,
+            "Very High": 11.4343724466403
+          },
+          "('itm_pe_vol_delta_pct', 'min')": {
+            "Very Low": -17.93122547349253,
+            "Low": -5.603888174313759,
+            "Medium": -4.421821794912097,
+            "High": 1.1700250844047067,
+            "Very High": 3.7852826935334085
+          },
+          "('itm_pe_vol_delta_pct', 'max')": {
+            "Very Low": -5.6332494866760126,
+            "Low": -4.423415174153134,
+            "Medium": 0.43113678130193406,
+            "High": 3.779501905898101,
+            "Very High": 53.291598164479524
+          }
+        }
+      }
+    },
+    "correlations": {
+      "itm_ce_delta_pct": 0.040902601130540894,
+      "itm_pe_delta_pct": 0.20715463176596316,
+      "itm_ce_vol_delta_pct": -0.3209582759977234,
+      "itm_pe_vol_delta_pct": 0.5524472076521865
+    },
+    "combinations": {
+      "oi_divergence": {
+        "positive_divergence": {
+          "count": 42,
+          "win_rate": 0.2857142857142857,
+          "avg_pnl": -1006.2738095238097
+        },
+        "negative_divergence": {
+          "count": 74,
+          "win_rate": 0.2702702702702703,
+          "avg_pnl": -1080.2986486486486
+        }
+      },
+      "volume_divergence": {
+        "positive_divergence": {
+          "count": 21,
+          "win_rate": 0.19047619047619047,
+          "avg_pnl": -1115.6857142857145
+        },
+        "negative_divergence": {
+          "count": 61,
+          "win_rate": 0.01639344262295082,
+          "avg_pnl": -1970.51475409836
+        }
+      },
+      "signal_agreement": {
+        "agreement": {
+          "count": 110,
+          "win_rate": 0.32727272727272727,
+          "avg_pnl": -852.7945454545454
+        },
+        "disagreement": {
+          "count": 21,
+          "win_rate": 0.38095238095238093,
+          "avg_pnl": -896.8619047619051
+        }
+      }
+    }
+  }
+}
