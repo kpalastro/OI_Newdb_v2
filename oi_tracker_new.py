@@ -983,13 +983,27 @@ class FeatureWorker(MpProcess):
                         state=rl_state
                     )
                     
-                    ml_signal = router_signal.signal
-                    ml_confidence = router_signal.confidence
-                    ml_rationale = router_signal.rationale
-                    ml_metadata = router_signal.metadata or {}
+                    # Route signal through strategy (YouTube strategy for intraday)
+                    # This ensures YouTube strategy is used independently
+                    trade_recommendation = strategy_router.route_strategy(
+                        signal=router_signal,
+                        features=ml_features_dict
+                    )
+                    
+                    # Use trade recommendation signal/confidence if available, otherwise fallback to router signal
+                    ml_signal = trade_recommendation.signal if trade_recommendation else router_signal.signal
+                    ml_confidence = trade_recommendation.confidence if trade_recommendation else router_signal.confidence
+                    ml_rationale = trade_recommendation.rationale if trade_recommendation else router_signal.rationale
+                    ml_metadata = trade_recommendation.metadata.copy() if trade_recommendation and trade_recommendation.metadata else (router_signal.metadata or {})
                     
                     # Add source information
                     ml_metadata['source'] = router_signal.source
+                    ml_metadata['strategy_name'] = trade_recommendation.strategy_name if trade_recommendation else router_signal.source
+                    
+                    # Ensure recommended_lots is in metadata (from YouTube strategy)
+                    if trade_recommendation and trade_recommendation.metadata:
+                        if 'recommended_lots' in trade_recommendation.metadata:
+                            ml_metadata['recommended_lots'] = trade_recommendation.metadata['recommended_lots']
                     
                     collector = get_metrics_collector(exchange)
                     try:

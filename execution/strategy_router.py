@@ -20,6 +20,7 @@ try:
     from strategies.oi_buildup import OIBuildupStrategy
     from strategies.vol_expansion import VolatilityExpansionStrategy
     from strategies.expiry_pin import ExpiryPinStrategy
+    from strategies.youtube_strategy import YouTubeStrategy
     STRATEGIES_AVAILABLE = True
 except ImportError as e:
     logging.getLogger(__name__).warning(f"Strategy imports failed: {e}")
@@ -72,7 +73,8 @@ class AdvancedStrategyRouter:
                 'gamma_scalping': GammaScalpingStrategy(),
                 'oi_buildup': OIBuildupStrategy(),
                 'vol_expansion': VolatilityExpansionStrategy(),
-                'expiry_pin': ExpiryPinStrategy()
+                'expiry_pin': ExpiryPinStrategy(),
+                'youtube': YouTubeStrategy()
             }
         else:
             self.strategies = {}
@@ -259,7 +261,21 @@ class AdvancedStrategyRouter:
         Returns:
             TradeRecommendation with specific strategy details
         """
-        if not STRATEGIES_AVAILABLE or signal.signal == 'HOLD':
+        # Allow YouTube strategy to process HOLD signals (it has its own filtering logic)
+        use_youtube = signal.metadata.get('use_youtube_strategy', False) or features.get('use_youtube_strategy', False)
+        
+        if not STRATEGIES_AVAILABLE:
+             return TradeRecommendation(
+                signal=signal.signal,
+                confidence=signal.confidence,
+                strategy_name="ML_Base",
+                rationale=signal.rationale,
+                suggested_contract="ATM",
+                metadata=signal.metadata
+            )
+        
+        # Skip early return for HOLD if YouTube strategy is requested (it needs to analyze HOLD signals)
+        if signal.signal == 'HOLD' and not use_youtube:
              return TradeRecommendation(
                 signal=signal.signal,
                 confidence=signal.confidence,
@@ -279,18 +295,34 @@ class AdvancedStrategyRouter:
         # Routing Logic
         selected_strategy = None
         
-        if horizon == 'expiry':
-            selected_strategy = self.strategies.get('expiry_pin')
-            
-        elif regime == 'low_vol' and horizon == 'intraday':
-            selected_strategy = self.strategies.get('gamma_scalping')
-            
-        elif regime in ['trending_up', 'trending_down'] or horizon == 'swing':
-            selected_strategy = self.strategies.get('oi_buildup')
-            
-        elif features.get('is_squeeze', False) or features.get('bb_width', 1.0) < 0.15:
-            # Detect squeeze condition implicitly if not passed
-            selected_strategy = self.strategies.get('vol_expansion')
+        # YOUTUBE STRATEGY: Independent and always used for intraday (highest priority)
+        # This makes YouTube strategy run independently from other strategies
+        if horizon == 'intraday':
+            # Check if YouTube strategy is explicitly requested OR always use for intraday
+            use_youtube = (
+                signal.metadata.get('use_youtube_strategy', False) or 
+                features.get('use_youtube_strategy', False) or
+                True  # Always use YouTube strategy for intraday (independent mode)
+            )
+            if use_youtube:
+                selected_strategy = self.strategies.get('youtube')
+                if selected_strategy:
+                    LOGGER.debug(f"[{self.exchange}] Routing to YouTube strategy (independent mode for intraday)")
+        
+        # Other strategies only used if YouTube strategy is not available or for non-intraday
+        if not selected_strategy:
+            if horizon == 'expiry':
+                selected_strategy = self.strategies.get('expiry_pin')
+                
+            elif regime == 'low_vol' and horizon == 'intraday':
+                selected_strategy = self.strategies.get('gamma_scalping')
+                
+            elif regime in ['trending_up', 'trending_down'] or horizon == 'swing':
+                selected_strategy = self.strategies.get('oi_buildup')
+                
+            elif features.get('is_squeeze', False) or features.get('bb_width', 1.0) < 0.15:
+                # Detect squeeze condition implicitly if not passed
+                selected_strategy = self.strategies.get('vol_expansion')
             
         # Fallback / Default
         if selected_strategy:
@@ -300,7 +332,13 @@ class AdvancedStrategyRouter:
                 'confidence': signal.confidence, 
                 'source': signal.source
             }
-            return selected_strategy.analyze(signal_dict, features, {})
+            # Create market_state for strategy (needed for YouTube strategy)
+            market_state = {
+                'strike_difference': features.get('strike_difference', 50.0),
+                'handler': None,  # Not available in router context
+                'exchange': self.exchange  # Pass exchange for BSE/NSE-specific filters
+            }
+            return selected_strategy.analyze(signal_dict, features, market_state)
         else:
             # Return original as base recommendation
              return TradeRecommendation(
