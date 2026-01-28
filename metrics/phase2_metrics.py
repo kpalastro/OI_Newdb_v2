@@ -167,6 +167,7 @@ class Phase2MetricsCollector:
         quantity_lots: int = 0,
         pnl: Optional[float] = None,
         constraint_violation: bool = False,
+        metadata: Optional[Dict] = None,
     ) -> None:
         """Record paper trading execution metrics."""
         ts = now_ist()
@@ -194,6 +195,7 @@ class Phase2MetricsCollector:
                 quantity_lots=quantity_lots,
                 pnl=pnl,
                 constraint_violation=constraint_violation,
+                metadata=metadata,
             )
         except Exception as exc:
             LOGGER.debug(f"Failed to persist paper trading metric to DB: {exc}")

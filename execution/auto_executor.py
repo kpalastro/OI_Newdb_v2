@@ -127,15 +127,24 @@ class AutoExecutor:
         """
         try:
             collector = get_metrics_collector(self.exchange)
-            # Extract ITM metadata from signal metadata
-            itm_metadata = {}
+            # Extract metadata from signal metadata
+            metadata = {}
             if hasattr(signal, 'metadata') and signal.metadata:
                 # Extract ITM-related metadata
                 for key in ['itm_bearish_signal', 'itm_bullish_signal', 'itm_peak_detection',
                            'itm_score', 'itm_confidence_multiplier', 'itm_position_multiplier',
                            'itm_rationale', 'itm_reasons', 'itm_warnings']:
                     if key in signal.metadata:
-                        itm_metadata[key] = signal.metadata[key]
+                        metadata[key] = signal.metadata[key]
+                
+                # Extract strategy metadata (for OptimizedOptionReturnStrategy)
+                for key in ['strategy_name', 'predicted_return', 'horizon', 'option_type',
+                           'ce_return', 'pe_return', 'ce_confidence', 'pe_confidence',
+                           'turning_point_prob', 'option_return_prediction',
+                           # Link fields for exact join with trade logs / recommendations
+                           'signal_id', 'symbol']:
+                    if key in signal.metadata:
+                        metadata[key] = signal.metadata[key]
             
             collector.record_paper_trading(
                 executed=executed,
@@ -145,7 +154,7 @@ class AutoExecutor:
                 quantity_lots=quantity_lots,
                 pnl=pnl,
                 constraint_violation=constraint_violation,
-                metadata=itm_metadata if itm_metadata else None,
+                metadata=metadata if metadata else None,
             )
         except Exception as exc:
             LOGGER.debug(f"[{self.exchange}] Paper trading metrics failed: {exc}")
@@ -644,6 +653,12 @@ class AutoExecutor:
         position_id = f"{self.exchange}_AUTO_{position_counter:04d}"
         side = 'B'  # Always buy - signal determines option type (CE or PE), not buy/sell
         
+        # Get strategy name and predicted return from metadata
+        strategy_name = signal.metadata.get('strategy_name', 'ML_Base')
+        predicted_return = signal.metadata.get('predicted_return', 0.0)
+        horizon = signal.metadata.get('horizon', '15m')
+        entry_timestamp = now_ist()
+        
         position = {
             'id': position_id,
             'symbol': symbol,
@@ -655,7 +670,8 @@ class AutoExecutor:
             'direction': signal.signal,
             'entry_price': fill_price,
             'qty': result.quantity * lot_size,  # Convert lots to quantity using dynamic lot size
-            'entry_time': now_ist().strftime('%Y-%m-%d %H:%M:%S'),
+            'entry_time': entry_timestamp.strftime('%Y-%m-%d %H:%M:%S'),
+            'entry_timestamp': entry_timestamp,  # Store datetime object for exit logic
             'current_price': current_price,
             'mtm': 0.0,
             'exchange': self.exchange,
@@ -663,6 +679,10 @@ class AutoExecutor:
             'confidence': signal.confidence,
             'kelly_fraction': signal.metadata.get('kelly_fraction', 0.0),
             'signal_id': signal.metadata.get('signal_id'),
+            # Store strategy metadata for optimized position monitoring
+            'strategy': strategy_name,
+            'predicted_return': predicted_return,
+            'horizon': horizon,
         }
         
         self.open_positions[position_id] = position

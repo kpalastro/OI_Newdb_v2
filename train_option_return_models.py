@@ -461,8 +461,9 @@ def train_turning_point_model(
     
     y = turning_point
     
-    if y.sum() < 10:
-        LOGGER.warning("Insufficient turning point samples. Skipping turning point model.")
+    min_turning_point_samples = 10
+    if y.sum() < min_turning_point_samples:
+        LOGGER.warning(f"Insufficient turning point samples: {y.sum()} (need >= {min_turning_point_samples}). Skipping turning point model.")
         return {}
     
     LOGGER.info(f"  Turning point samples: {y.sum()}/{len(y)} ({y.sum()/len(y)*100:.1f}%)")
@@ -636,8 +637,18 @@ def train_all_option_models(
     # Remove duplicate columns from X (in case DataFrame has duplicates)
     X = X.loc[:, ~X.columns.duplicated()]
     
-    # Remove rows with any NaN features
-    valid_mask = ~X.isna().any(axis=1)
+    # Fill NaN features with 0 instead of removing rows (more lenient)
+    # This preserves more training samples
+    LOGGER.info(f"Before NaN handling: {len(X)} samples")
+    nan_counts = X.isna().sum()
+    if nan_counts.sum() > 0:
+        LOGGER.info(f"Features with NaN: {nan_counts[nan_counts > 0].to_dict()}")
+        # Fill NaN with 0 for numeric features
+        X = X.fillna(0.0)
+        LOGGER.info(f"After filling NaN with 0: {len(X)} samples")
+    
+    # Only remove rows where ALL features are NaN (shouldn't happen after fillna, but safety check)
+    valid_mask = ~X.isna().all(axis=1)
     X = X[valid_mask]
     df = df[valid_mask]
     
@@ -661,9 +672,28 @@ def train_all_option_models(
         # Create targets
         ce_target, pe_target = create_option_return_targets(df, horizon)
         
-        # Filter to valid targets
-        valid_ce = ce_target.notna() & (ce_target != 0)  # Non-zero changes
-        valid_pe = pe_target.notna() & (pe_target != 0)
+        # Diagnostic: Show target statistics
+        LOGGER.info(f"Target statistics for {horizon}:")
+        LOGGER.info(f"  CE: Total={len(ce_target)}, Non-null={ce_target.notna().sum()}, "
+                   f"Non-zero={((ce_target != 0) & ce_target.notna()).sum()}, "
+                   f"Mean={ce_target[ce_target.notna()].mean():.2f}%, "
+                   f"Std={ce_target[ce_target.notna()].std():.2f}%")
+        LOGGER.info(f"  PE: Total={len(pe_target)}, Non-null={pe_target.notna().sum()}, "
+                   f"Non-zero={((pe_target != 0) & pe_target.notna()).sum()}, "
+                   f"Mean={pe_target[pe_target.notna()].mean():.2f}%, "
+                   f"Std={pe_target[pe_target.notna()].std():.2f}%")
+        
+        # Filter to valid targets (non-null, allow zero changes for now)
+        # Note: We allow zero changes because they're still valid training samples
+        # The model should learn to predict when there's no movement
+        valid_ce = ce_target.notna()  # Allow zero changes
+        valid_pe = pe_target.notna()  # Allow zero changes
+        
+        # Alternative: If we want non-zero only, use:
+        # valid_ce = ce_target.notna() & (ce_target != 0)
+        # valid_pe = pe_target.notna() & (pe_target != 0)
+        
+        LOGGER.info(f"  Valid CE samples: {valid_ce.sum()}, Valid PE samples: {valid_pe.sum()}")
         
         # Train CE model
         if valid_ce.sum() > 100:
