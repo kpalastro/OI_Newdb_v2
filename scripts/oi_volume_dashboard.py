@@ -19,7 +19,7 @@ Then open in browser:
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -36,6 +36,33 @@ import database_new as db
 
 
 app = Flask(__name__)
+
+try:
+    # Python 3.9+
+    from zoneinfo import ZoneInfo  # type: ignore
+    IST = ZoneInfo("Asia/Kolkata")
+except Exception:
+    IST = None
+
+
+def _to_utc_epoch_seconds(ts: datetime) -> int:
+    """
+    Convert DB / log timestamps to UTC epoch seconds.
+
+    Important: many tables/logs store IST timestamps as naive datetimes.
+    For chart alignment, we normalize everything to UTC seconds.
+    """
+    if ts is None:
+        return 0
+    if ts.tzinfo is None:
+        if IST is not None:
+            ts = ts.replace(tzinfo=IST).astimezone(timezone.utc)
+        else:
+            # Fallback: treat naive as UTC (best-effort)
+            ts = ts.replace(tzinfo=timezone.utc)
+    else:
+        ts = ts.astimezone(timezone.utc)
+    return int(ts.timestamp())
 
 
 def _parse_date(s: str, default: date) -> date:
@@ -99,8 +126,8 @@ def api_itm_oi_volume() -> Response:
             except Exception:
                 pass
 
-        # Use Unix timestamp in seconds for Lightweight Charts
-        t = int(ts.timestamp())
+        # Use UTC epoch seconds for Lightweight Charts
+        t = _to_utc_epoch_seconds(ts)
         points.append(
             {
                 "time": t,
@@ -194,7 +221,7 @@ def api_bars_1m() -> Response:
         for ts, o, h, l, c, v, oi in rows:
             bars.append(
                 {
-                    "time": int(ts.timestamp()),
+                    "time": _to_utc_epoch_seconds(ts),
                     "open": float(o) if o is not None else None,
                     "high": float(h) if h is not None else None,
                     "low": float(l) if l is not None else None,
@@ -223,7 +250,10 @@ def api_trade_logs() -> Response:
     Used to overlay markers on the 1m chart.
     """
     exchange = request.args.get("exchange", "").upper().strip()
+    # NOTE: For overlaying trades on an underlying (e.g., SENSEX FUT) chart,
+    # we intentionally do NOT filter by symbol unless explicitly required.
     symbol = (request.args.get("symbol") or "").strip()
+    outcome = (request.args.get("outcome") or "all").strip().lower()  # all|profit|loss
     today = datetime.utcnow().date()
     default_start = today - timedelta(days=5)
     start_date = _parse_date(request.args.get("start", ""), default_start)
@@ -239,13 +269,55 @@ def api_trade_logs() -> Response:
                 import pandas as pd
 
                 df = pd.read_csv(p)
+                # Handle legacy files without header: if we don't see 'entry_timestamp'
+                # but have at least 18 columns, assume TRADE_LOG_COLUMNS order.
+                if "entry_timestamp" not in df.columns and len(df.columns) >= 18:
+                    df.columns = [
+                        "entry_timestamp",
+                        "exit_timestamp",
+                        "exchange",
+                        "position_id",
+                        "symbol",
+                        "type",
+                        "side",
+                        "quantity",
+                        "entry_price",
+                        "exit_price",
+                        "pnl",
+                        "entry_reason",
+                        "exit_reason",
+                        "status",
+                        "confidence",
+                        "kelly_fraction",
+                        "constraint_violation",
+                        "signal_id",
+                    ]
+
                 # Normalize
                 if "entry_timestamp" in df.columns:
                     df["entry_timestamp"] = pd.to_datetime(df["entry_timestamp"], errors="coerce")
                 if "exit_timestamp" in df.columns:
                     df["exit_timestamp"] = pd.to_datetime(df["exit_timestamp"], errors="coerce")
 
+                # Trade logs are written in IST as naive timestamps; convert to UTC epoch
+                try:
+                    if getattr(df["entry_timestamp"].dt, "tz", None) is None:
+                        df["entry_timestamp"] = df["entry_timestamp"].dt.tz_localize("Asia/Kolkata")
+                    df["entry_timestamp_utc"] = df["entry_timestamp"].dt.tz_convert("UTC")
+                except Exception:
+                    df["entry_timestamp_utc"] = df["entry_timestamp"]
+                try:
+                    if getattr(df["exit_timestamp"].dt, "tz", None) is None:
+                        df["exit_timestamp"] = df["exit_timestamp"].dt.tz_localize("Asia/Kolkata")
+                    df["exit_timestamp_utc"] = df["exit_timestamp"].dt.tz_convert("UTC")
+                except Exception:
+                    df["exit_timestamp_utc"] = df["exit_timestamp"]
+
                 for _, r in df.iterrows():
+                    # Only plot closed trades on the 1m chart
+                    st = str(r.get("status", "") or "").strip().upper()
+                    if st and st != "CLOSED":
+                        continue
                     ex = str(r.get("exchange", "")).upper()
                     sym = str(r.get("symbol", "")).strip()
                     if exchange and ex != exchange:
@@ -253,10 +325,14 @@ def api_trade_logs() -> Response:
                     if symbol and sym != symbol:
                         continue
 
-                    entry_ts = r.get("entry_timestamp")
-                    exit_ts = r.get("exit_timestamp")
+                    entry_ts = r.get("entry_timestamp_utc")
+                    exit_ts = r.get("exit_timestamp_utc")
                     if pd.isna(entry_ts):
                         continue
+                    # Align trade timestamps to minute bars by dropping seconds
+                    entry_ts = pd.Timestamp(entry_ts).replace(second=0, microsecond=0)
+                    if exit_ts is not None and not pd.isna(exit_ts):
+                        exit_ts = pd.Timestamp(exit_ts).replace(second=0, microsecond=0)
 
                     side = str(r.get("side", "BUY")).upper()
                     pnl = r.get("pnl")
@@ -265,6 +341,32 @@ def api_trade_logs() -> Response:
                     except Exception:
                         pnl = None
 
+                    # Outcome filter
+                    if outcome == "profit" and not (pnl is not None and pnl > 0):
+                        continue
+                    if outcome == "loss" and not (pnl is not None and pnl < 0):
+                        continue
+
+                    entry_price = r.get("entry_price")
+                    exit_price = r.get("exit_price")
+                    try:
+                        entry_price = float(entry_price) if entry_price is not None and entry_price == entry_price else None
+                    except Exception:
+                        entry_price = None
+                    try:
+                        exit_price = float(exit_price) if exit_price is not None and exit_price == exit_price else None
+                    except Exception:
+                        exit_price = None
+
+                    exit_reason = r.get("exit_reason")
+                    # Pandas may represent missing strings as NaN (float); convert to None
+                    try:
+                        import math
+                        if isinstance(exit_reason, float) and math.isnan(exit_reason):
+                            exit_reason = None
+                    except Exception:
+                        pass
+
                     rows.append(
                         {
                             "position_id": r.get("position_id"),
@@ -272,9 +374,11 @@ def api_trade_logs() -> Response:
                             "exchange": ex,
                             "side": side,
                             "entry_time": int(pd.Timestamp(entry_ts).timestamp()),
-                            "exit_time": int(pd.Timestamp(exit_ts).timestamp()) if exit_ts == exit_ts else None,
+                            "exit_time": int(pd.Timestamp(exit_ts).timestamp()) if exit_ts is not None and not pd.isna(exit_ts) else None,
+                            "entry_price": entry_price,
+                            "exit_price": exit_price,
                             "pnl": pnl,
-                            "exit_reason": r.get("exit_reason"),
+                            "exit_reason": exit_reason,
                         }
                     )
             except Exception:
@@ -442,9 +546,10 @@ def index() -> str:
       .controls button:disabled { opacity: 0.5; cursor: default; }
       .chart-row { display: flex; flex-direction: column; gap: 8px; }
       .chart-title { font-size: 14px; margin-top: 8px; margin-bottom: 4px; }
-      #chart-1m { height: 320px; }
-      #chart-oi, #chart-vol { height: 260px; }
+      #chart-1m { height: 400px; }
+      #chart-subpanel { height: 300px; }
       .status { font-size: 12px; margin-top: 6px; color: #9ca3af; }
+      .hover-info { font-size: 12px; margin-top: 4px; color: #e5e7eb; white-space: pre-line; }
       a { color: #60a5fa; }
     </style>
     <!-- Pin a specific Lightweight Charts version for stable API -->
@@ -463,6 +568,12 @@ def index() -> str:
         <select id="symbol">
           <option value="">(Auto-select)</option>
         </select>
+        <label for="tradeFilter">Trades:</label>
+        <select id="tradeFilter">
+          <option value="all">All</option>
+          <option value="profit">Profit only</option>
+          <option value="loss">Loss only</option>
+        </select>
         <label for="start">From:</label>
         <input type="date" id="start" />
         <label for="end">To:</label>
@@ -470,13 +581,12 @@ def index() -> str:
         <button id="load-btn">Load</button>
         <span class="status" id="status"></span>
       </div>
+      <div class="hover-info" id="hover-info"></div>
       <div class="chart-row">
-        <div class="chart-title">1m Candles (multi_resolution_bars) + trade markers</div>
+        <div class="chart-title">1m Candles + Trade Markers</div>
         <div id="chart-1m"></div>
-        <div class="chart-title">ITM CE/PE OI % Change (3m wavg)</div>
-        <div id="chart-oi"></div>
-        <div class="chart-title">ITM CE/PE Volume % Change (3m wavg)</div>
-        <div id="chart-vol"></div>
+        <div class="chart-title">ITM CE/PE OI % Change (3m wavg) &amp; Volume % Change (3m wavg)</div>
+        <div id="chart-subpanel"></div>
       </div>
     </div>
     <script>
@@ -485,7 +595,12 @@ def index() -> str:
       const endInput = document.getElementById('end');
       const exchangeSelect = document.getElementById('exchange');
       const symbolSelect = document.getElementById('symbol');
+      const tradeFilterSelect = document.getElementById('tradeFilter');
       const loadBtn = document.getElementById('load-btn');
+      const hoverInfoEl = document.getElementById('hover-info');
+
+      // Store latest OI/Volume points for hover lookup
+      let oiVolumePoints = [];
 
       // Load symbols dropdown when exchange/date range changes
       async function loadSymbols() {
@@ -518,6 +633,7 @@ def index() -> str:
       exchangeSelect.addEventListener('change', loadSymbols);
       startInput.addEventListener('change', loadSymbols);
       endInput.addEventListener('change', loadSymbols);
+      tradeFilterSelect.addEventListener('change', () => loadData());
 
       // Default date range: last 5 days
       (function initDates() {
@@ -548,9 +664,9 @@ def index() -> str:
         wickDownColor: '#ef4444',
       });
 
-      // Create charts
-      const chartOiContainer = document.getElementById('chart-oi');
-      const chartOi = LightweightCharts.createChart(chartOiContainer, {
+      // Create sub-panel chart with OI and Volume series
+      const chartSubpanelContainer = document.getElementById('chart-subpanel');
+      const chartSubpanel = LightweightCharts.createChart(chartSubpanelContainer, {
         layout: { background: { color: '#0b1622' }, textColor: '#d1d5db' },
         grid: {
           vertLines: { color: '#1f2933' },
@@ -564,38 +680,20 @@ def index() -> str:
         rightPriceScale: { borderColor: '#374151' },
         crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
       });
-      const ceOiSeries = chartOi.addLineSeries({ color: '#3b82f6', lineWidth: 2 });
-      const peOiSeries = chartOi.addLineSeries({ color: '#f97316', lineWidth: 2 });
-      const oiZeroSeries = chartOi.addLineSeries({
+      // CE series: green (#22c55e)
+      const ceOiSeries = chartSubpanel.addLineSeries({ color: '#22c55e', lineWidth: 2, title: 'CE OI %' });
+      const ceVolSeries = chartSubpanel.addLineSeries({ color: '#22c55e', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dotted, title: 'CE Vol %' });
+      // PE series: red (#ef4444)
+      const peOiSeries = chartSubpanel.addLineSeries({ color: '#ef4444', lineWidth: 2, title: 'PE OI %' });
+      const peVolSeries = chartSubpanel.addLineSeries({ color: '#ef4444', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dotted, title: 'PE Vol %' });
+      // White zero line
+      const zeroSeries = chartSubpanel.addLineSeries({
         color: '#ffffff',
         lineWidth: 1,
         lineStyle: LightweightCharts.LineStyle.Dashed,
       });
 
-      const chartVolContainer = document.getElementById('chart-vol');
-      const chartVol = LightweightCharts.createChart(chartVolContainer, {
-        layout: { background: { color: '#0b1622' }, textColor: '#d1d5db' },
-        grid: {
-          vertLines: { color: '#1f2933' },
-          horzLines: { color: '#1f2933' },
-        },
-        timeScale: {
-          borderColor: '#374151',
-          timeVisible: true,
-          secondsVisible: false,
-        },
-        rightPriceScale: { borderColor: '#374151' },
-        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-      });
-      const ceVolSeries = chartVol.addLineSeries({ color: '#22c55e', lineWidth: 2 });
-      const peVolSeries = chartVol.addLineSeries({ color: '#ef4444', lineWidth: 2 });
-      const volZeroSeries = chartVol.addLineSeries({
-        color: '#ffffff',
-        lineWidth: 1,
-        lineStyle: LightweightCharts.LineStyle.Dashed,
-      });
-
-      // --- Sync zoom/pan between charts (time scale) ---
+      // --- Sync zoom/pan between main chart and sub-panel (time scale) ---
       let isSyncing = false;
       function isValidRange(range) {
         return !!(range && range.from != null && range.to != null);
@@ -616,29 +714,49 @@ def index() -> str:
         }
       }
 
-      chartOi.timeScale().subscribeVisibleTimeRangeChange(() => {
-        syncTimeScale(chartOi, chartVol);
-      });
-      chartVol.timeScale().subscribeVisibleTimeRangeChange(() => {
-        syncTimeScale(chartVol, chartOi);
-      });
-
-      // Also keep the candle chart in sync
+      // Sync main chart and sub-panel
       chart1m.timeScale().subscribeVisibleTimeRangeChange(() => {
-        syncTimeScale(chart1m, chartOi);
-        syncTimeScale(chart1m, chartVol);
+        syncTimeScale(chart1m, chartSubpanel);
       });
-      chartOi.timeScale().subscribeVisibleTimeRangeChange(() => {
-        syncTimeScale(chartOi, chart1m);
+      chartSubpanel.timeScale().subscribeVisibleTimeRangeChange(() => {
+        syncTimeScale(chartSubpanel, chart1m);
       });
 
       function setStatus(msg) {
         statusEl.textContent = msg || '';
       }
 
+      function setHoverInfo(text) {
+        hoverInfoEl.textContent = text || '';
+      }
+
+      function formatValue(v) {
+        if (v === null || v === undefined) return '--';
+        const num = Number(v);
+        if (!isFinite(num)) return '--';
+        return num.toFixed(2);
+      }
+
+      // Find nearest OI/Volume point by time (epoch seconds)
+      function findNearestOiVolPoint(time) {
+        if (!oiVolumePoints.length || time == null) return null;
+        // points are time-sorted from backend
+        let best = null;
+        let bestDiff = Infinity;
+        for (const p of oiVolumePoints) {
+          const diff = Math.abs(p.time - time);
+          if (diff < bestDiff) {
+            bestDiff = diff;
+            best = p;
+          }
+        }
+        return best;
+      }
+
       async function loadData() {
         const ex = exchangeSelect.value || 'NSE';
         const sym = (symbolSelect.value || '').trim();
+        const tradeFilter = (tradeFilterSelect.value || 'all').trim();
         const start = startInput.value;
         const end = endInput.value;
         if (!start || !end) {
@@ -647,6 +765,7 @@ def index() -> str:
         }
         loadBtn.disabled = true;
         setStatus('Loading...');
+        let candleCount = 0;
         try {
           // 1) Load candles
           {
@@ -656,35 +775,36 @@ def index() -> str:
             if (!resp.ok) throw new Error('Bars HTTP ' + resp.status);
             const data = await resp.json();
             const bars = data.bars || [];
-            // Filter out null OHLC
             const candleData = bars
               .filter(b => b.open != null && b.high != null && b.low != null && b.close != null)
               .map(b => ({ time: b.time, open: b.open, high: b.high, low: b.low, close: b.close }));
+            candleCount = candleData.length;
             candleSeries.setData(candleData);
             if (data.symbol && !sym) {
               symbolSelect.value = data.symbol; // show auto-selected symbol
             }
           }
 
-          // 2) Load actual trade markers from trade_logs only
+          // 2) Load trade markers from trade_logs (CLOSED only) and overlay on 1m candles
           const markers = [];
+          let tradeCount = 0;
           {
             const params = new URLSearchParams({ start, end });
             if (ex) params.set('exchange', ex);
-            const sym2 = (symbolSelect.value || '').trim();
-            if (sym2) params.set('symbol', sym2);
+            params.set('outcome', tradeFilter);
             const resp = await fetch('/api/trade_logs?' + params.toString());
             if (resp.ok) {
               const data = await resp.json();
               const trades = data.trades || [];
+              tradeCount = trades.length;
               for (const t of trades) {
                 if (t.entry_time) {
                   markers.push({
                     time: t.entry_time,
                     position: 'belowBar',
-                    color: '#60a5fa',
+                    color: t.side === 'SELL' ? '#f97316' : '#22c55e',
                     shape: t.side === 'SELL' ? 'arrowDown' : 'arrowUp',
-                    text: `${t.side} @ ${t.entry_price || ''}`,
+                    text: (t.side === 'BUY' ? 'B ' : 'S ') + (t.symbol || '').slice(-12),
                   });
                 }
                 if (t.exit_time) {
@@ -693,14 +813,13 @@ def index() -> str:
                     position: 'aboveBar',
                     color: (t.pnl != null && t.pnl < 0) ? '#ef4444' : '#22c55e',
                     shape: 'circle',
-                    text: `EXIT ${t.pnl != null ? (t.pnl > 0 ? '+' : '') + t.pnl.toFixed(0) : ''}`,
+                    text: 'X ' + (t.pnl != null ? (t.pnl > 0 ? '+' : '') + t.pnl.toFixed(0) : ''),
                   });
                 }
               }
             }
           }
 
-          // Set markers on candlestick chart (only actual trades)
           candleSeries.setMarkers(markers);
 
           const params = new URLSearchParams({ exchange: ex, start, end });
@@ -710,12 +829,15 @@ def index() -> str:
           }
           const data = await resp.json();
           const points = data.points || [];
+          oiVolumePoints = points;
           if (!points.length) {
             ceOiSeries.setData([]);
             peOiSeries.setData([]);
             ceVolSeries.setData([]);
             peVolSeries.setData([]);
+            zeroSeries.setData([]);
             setStatus('No data for this range.');
+            setHoverInfo('');
             return;
           }
 
@@ -731,22 +853,22 @@ def index() -> str:
             if (p.pe_vol_pct != null) peVolData.push({ time: p.time, value: p.pe_vol_pct });
           }
 
-          // Horizontal zero line on both charts using first/last time
+          // Horizontal zero line using first/last time
           const firstTime = points[0].time;
           const lastTime = points[points.length - 1].time;
           const zeroLineData = [
             { time: firstTime, value: 0 },
             { time: lastTime, value: 0 },
           ];
-          oiZeroSeries.setData(zeroLineData);
-          volZeroSeries.setData(zeroLineData);
+          zeroSeries.setData(zeroLineData);
 
+          // Set all series data on sub-panel chart
           ceOiSeries.setData(ceOiData);
           peOiSeries.setData(peOiData);
           ceVolSeries.setData(ceVolData);
           peVolSeries.setData(peVolData);
 
-          setStatus(`Loaded ${points.length} points for ${data.exchange} from ${data.start} to ${data.end}.`);
+          setStatus(`1m: ${candleCount} candles, ${tradeCount} trades (${markers.length} markers). OI/Vol: ${points.length} points ${data.start}–${data.end}.`);
         } catch (err) {
           console.error(err);
           setStatus('Error loading data: ' + err.message);
@@ -756,6 +878,27 @@ def index() -> str:
       }
 
       loadBtn.addEventListener('click', loadData);
+
+      // When hovering on the main candle chart, show matching OI/Volume values
+      chart1m.subscribeCrosshairMove(param => {
+        if (!param || param.time === undefined) {
+          setHoverInfo('');
+          return;
+        }
+        const t = typeof param.time === 'number' ? param.time : param.time;
+        const p = findNearestOiVolPoint(t);
+        if (!p) {
+          setHoverInfo('');
+          return;
+        }
+        const dt = new Date(t * 1000);
+        const timeLabel = dt.toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+        const text =
+          `Time: ${timeLabel}\n` +
+          `CE OI %: ${formatValue(p.ce_oi_pct)}   CE Vol %: ${formatValue(p.ce_vol_pct)}\n` +
+          `PE OI %: ${formatValue(p.pe_oi_pct)}   PE Vol %: ${formatValue(p.pe_vol_pct)}`;
+        setHoverInfo(text);
+      });
 
       // Initial load
       window.addEventListener('load', loadData);
