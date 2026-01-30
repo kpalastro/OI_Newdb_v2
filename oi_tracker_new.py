@@ -773,6 +773,58 @@ class ReelPersistence:
             logging.error(f"Reel persistence load failed: {e}")
 
 
+def backfill_reels_from_db(handlers: Dict[str, ExchangeDataHandler]) -> None:
+    """
+    On cold start (no reel snapshot or empty reels), backfill data_reels from
+    option_chain_snapshots so OI %CHG (10m, 15m, 30m) can be shown immediately
+    instead of waiting for live data to accumulate.
+    """
+    ph = _get_placeholder()
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cutoff = now_ist() - timedelta(minutes=DATA_REEL_MAX_LENGTH)
+        for exchange, handler in handlers.items():
+            with handler.lock:
+                has_any_reel = any(
+                    handler.data_reels.get(t) and len(handler.data_reels[t]) > 0
+                    for t in list(handler.data_reels.keys())
+                )
+            if has_any_reel:
+                continue
+            try:
+                cursor.execute(f"""
+                    SELECT timestamp, token, oi
+                    FROM option_chain_snapshots
+                    WHERE exchange = {ph} AND timestamp >= {ph}
+                    ORDER BY timestamp
+                """, (exchange, cutoff))
+                rows = cursor.fetchall()
+            except Exception as e:
+                logging.debug(f"[{exchange}] Backfill query skipped: {e}")
+                continue
+            if not rows:
+                continue
+            by_token = defaultdict(list)
+            for ts, token, oi in rows:
+                if token is not None and oi is not None:
+                    by_token[int(token)].append({'timestamp': ts, 'oi': oi})
+            with handler.lock:
+                for token, recs in by_token.items():
+                    reel = handler.data_reels[token]
+                    reel.clear()
+                    for r in sorted(recs, key=lambda x: x['timestamp']):
+                        reel.append({'oi': r['oi'], 'timestamp': r['timestamp']})
+            if by_token:
+                logging.info(
+                    f"[{exchange}] Backfilled reels from DB for {len(by_token)} tokens "
+                    f"({sum(len(v) for v in by_token.values())} points)"
+                )
+        release_db_connection(conn)
+    except Exception as e:
+        logging.warning(f"Reel backfill from DB failed: {e}")
+
+
 reel_persistence = ReelPersistence(Path('state/reels_snapshot.pkl'))
 
 
@@ -1578,12 +1630,29 @@ def feature_result_consumer():
             ):
                 executor = _get_auto_executor(result.exchange)
                 
-                # Enhanced cooldown logic: different cooldown when positions are open
+                # Run exit-on-signal-flip on every BUY/SELL (not only after cooldown) so that
+                # when the model flips to SELL we close BUY-direction (CE) positions immediately,
+                # and vice versa. Previously this ran only when opening a new trade, so positions
+                # stayed open until cooldown expired.
                 with handler.lock:
                     current_open_count = len(handler.open_positions)
                     has_open_positions = current_open_count > 0
                 
-                # Determine cooldown period based on whether positions are open
+                monthly_handler = None
+                if result.exchange == 'BANKNIFTY_MONTHLY':
+                    monthly_handler = exchange_handlers.get('BANKNIFTY_MONTHLY')
+                elif result.exchange == 'NIFTY_MONTHLY':
+                    monthly_handler = exchange_handlers.get('NIFTY_MONTHLY') or exchange_handlers.get('NSE_MONTHLY')
+                if has_open_positions:
+                    _exit_conflicting_positions_on_signal_flip(
+                        handler=handler,
+                        new_ml_signal=result.ml_signal,
+                        call_options=result.calls,
+                        put_options=result.puts,
+                        monthly_handler=monthly_handler,
+                    )
+                
+                # Enhanced cooldown logic: different cooldown when positions are open
                 if has_open_positions:
                     required_cooldown = executor.config.cooldown_with_positions_seconds
                     cooldown_reason = "positions open"
@@ -1652,33 +1721,6 @@ def feature_result_consumer():
                                 f"(cooldown: {cooldown_reason}, time since last: {time_since_last:.0f}s)"
                             )
                         else:
-                            # Get monthly handler for exchanges that need monthly expiry
-                            monthly_handler = None
-                            # NSE now uses weekly expiry, no monthly handler needed
-                            if result.exchange == 'BANKNIFTY_MONTHLY':
-                                # BANKNIFTY_MONTHLY uses itself as the monthly handler
-                                monthly_handler = exchange_handlers.get('BANKNIFTY_MONTHLY')
-                                if monthly_handler is None:
-                                    logging.warning("[BANKNIFTY_MONTHLY] Handler not available, skipping trade")
-                                    continue
-                            elif result.exchange == 'NIFTY_MONTHLY':
-                                # NIFTY_MONTHLY uses itself as the monthly handler (or NSE_MONTHLY if NIFTY_MONTHLY doesn't exist)
-                                monthly_handler = exchange_handlers.get('NIFTY_MONTHLY') or exchange_handlers.get('NSE_MONTHLY')
-                                if monthly_handler is None:
-                                    logging.warning("[NIFTY_MONTHLY] Monthly handler not available, skipping trade")
-                                    continue
-                            
-                            # Before opening a new position, close any existing positions
-                            # that are in the opposite direction (BUY vs SELL) of the new signal.
-                            # HOLD signals are ignored earlier in the pipeline.
-                            _exit_conflicting_positions_on_signal_flip(
-                                handler=handler,
-                                new_ml_signal=result.ml_signal,
-                                call_options=result.calls,
-                                put_options=result.puts,
-                                monthly_handler=monthly_handler,
-                            )
-
                             # Select contract based on exchange-specific strategy
                             selection = _select_auto_trade_contract(
                                 calls=result.calls,
@@ -5811,6 +5853,7 @@ def initialize_system(user_id: Optional[str] = None,
         # Configure exchanges
         _configure_exchange_handlers(all_instruments)
         reel_persistence.load(exchange_handlers)
+        backfill_reels_from_db(exchange_handlers)
         
         # Update connector with VIX token
         connector.vix_token = app_manager.vix_token
