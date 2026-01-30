@@ -8,6 +8,12 @@ XGBoost, CatBoost, RL), Optuna tuning per segment, and consolidated reporting.
 Supports:
 - Supervised learning: LightGBM, XGBoost, CatBoost
 - Reinforcement learning: PPO, DQN (via RL family)
+
+Incremental training:
+  Use --start and --end to train only on a specific date range (e.g. new data since last run):
+    python train_orchestrator.py --exchange NSE --start 2026-01-01 --end 2026-01-29 --window-days 21 --step-days 7
+  Ensure the range has at least (window-days + step-days) of data for at least one segment.
+  Without --start/--end, training uses the last --days from today (default 150).
 """
 from __future__ import annotations
 
@@ -122,6 +128,9 @@ class OrchestratorConfig:
     families: Sequence[str] = field(default_factory=lambda: ("lightgbm", "xgboost", "catboost"))
     optuna_trials: int = 10
     output: Optional[Path] = None
+    # Incremental training: optional fixed date range (YYYY-MM-DD). If set, overrides (today - days, today).
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
 
 
 @dataclass
@@ -370,17 +379,25 @@ def _select_families(names: Sequence[str]) -> List[ModelFamily]:
     return selected
 
 
-def _load_dataset(exchange: str, days: int) -> pd.DataFrame:
+def _load_dataset(config: OrchestratorConfig) -> pd.DataFrame:
     """
     Load and prepare dataset WITHOUT applying regime features.
     Regime features will be fitted per segment inside the walk-forward loop
     to prevent look-ahead bias.
+
+    If config.start_date and config.end_date are set (incremental run), use that range;
+    otherwise use (today - days, today).
     """
-    end_date = today_ist()
-    start_date = end_date - timedelta(days=days)
-    raw = db.load_historical_data_for_ml(exchange, start_date, end_date)
+    if config.start_date is not None and config.end_date is not None:
+        start_date = config.start_date
+        end_date = config.end_date
+        LOGGER.info("Incremental training: using fixed range %s to %s", start_date, end_date)
+    else:
+        end_date = today_ist()  # already returns date
+        start_date = end_date - timedelta(days=config.days)
+    raw = db.load_historical_data_for_ml(config.exchange, start_date, end_date)
     if raw is None or raw.empty:
-        raise RuntimeError(f"No data found for {exchange} in the last {days} days.")
+        raise RuntimeError(f"No data found for {config.exchange} from {start_date} to {end_date}.")
 
     features = prepare_training_features(raw, required_columns=REQUIRED_FEATURE_COLUMNS)
     target_frame = define_triple_barrier_target(features)
@@ -884,7 +901,7 @@ def _run_optuna(
 
 
 def run_orchestrator(config: OrchestratorConfig) -> Dict[str, Any]:
-    frame = _load_dataset(config.exchange, config.days)
+    frame = _load_dataset(config)
     frame.sort_index(inplace=True)
     
     # Diagnostic info
@@ -1329,8 +1346,23 @@ def parse_args() -> OrchestratorConfig:
                         help="Model families to evaluate. Options: lightgbm, xgboost, catboost, rl, rl-ppo, rl-dqn")
     parser.add_argument("--optuna-trials", type=int, default=10, help="Trials per segment (0 to skip).")
     parser.add_argument("--output", type=Path, default=None, help="Optional override path for the JSON summary.")
+    parser.add_argument("--start", type=str, default=None,
+                        help="Incremental: start date YYYY-MM-DD. Use with --end to train only on that range.")
+    parser.add_argument("--end", type=str, default=None,
+                        help="Incremental: end date YYYY-MM-DD. Use with --start to train only on that range.")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = parser.parse_args()
+
+    start_date = None
+    end_date = None
+    if args.start and args.end:
+        try:
+            start_date = datetime.strptime(args.start, "%Y-%m-%d").date()
+            end_date = datetime.strptime(args.end, "%Y-%m-%d").date()
+        except ValueError as e:
+            parser.error(f"Invalid --start/--end dates (use YYYY-MM-DD): {e}")
+    elif args.start or args.end:
+        parser.error("Both --start and --end must be set for incremental training.")
 
     logging.basicConfig(level=getattr(logging, args.log_level), format="%(asctime)s - %(levelname)s - %(message)s")
     return OrchestratorConfig(
@@ -1341,6 +1373,8 @@ def parse_args() -> OrchestratorConfig:
         families=args.families,
         optuna_trials=args.optuna_trials,
         output=args.output,
+        start_date=start_date,
+        end_date=end_date,
     )
 
 
