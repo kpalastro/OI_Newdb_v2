@@ -116,10 +116,12 @@ class AutoExecutor:
     ) -> None:
         """
         Log Phase 2 paper trading metrics for this execution decision.
+        Passes signal.metadata (itm_bearish_signal, signal_id, etc.) so it is stored in paper_trading_metrics.
         This helper is best-effort and never raises.
         """
         try:
             collector = get_metrics_collector(self.exchange)
+            metadata = getattr(signal, 'metadata', None) or {}
             collector.record_paper_trading(
                 executed=executed,
                 reason=reason,
@@ -128,6 +130,7 @@ class AutoExecutor:
                 quantity_lots=quantity_lots,
                 pnl=pnl,
                 constraint_violation=constraint_violation,
+                metadata=metadata,
             )
         except Exception as exc:
             LOGGER.debug(f"[{self.exchange}] Paper trading metrics failed: {exc}")

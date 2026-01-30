@@ -1130,33 +1130,64 @@ def record_paper_trading_metric(
     quantity_lots: int,
     pnl: float | None,
     constraint_violation: bool,
+    metadata: dict | None = None,
 ) -> None:
     """
     Persist a single paper trading metric event to the database.
+    If the table has a metadata JSONB column, it is populated (e.g. itm_bearish_signal, signal_id).
     """
     with db_lock:
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
             ph = _get_placeholder()
-            cursor.execute(f'''
-                INSERT INTO paper_trading_metrics (
-                    timestamp, exchange, executed, reason, signal,
-                    confidence, quantity_lots, pnl, constraint_violation,
-                    created_at
-                ) VALUES ({', '.join([ph]*10)})
-            ''', (
-                _coerce_iso_timestamp(timestamp),
-                exchange,
-                bool(executed),
-                reason,
-                signal,
-                float(confidence) if confidence is not None else None,
-                int(quantity_lots) if quantity_lots is not None else 0,
-                float(pnl) if pnl is not None else None,
-                bool(constraint_violation),
-                _coerce_iso_timestamp(now_ist())
-            ))
+            cursor.execute("""
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'paper_trading_metrics'
+                  AND column_name = 'metadata'
+            """)
+            has_metadata_col = cursor.fetchone() is not None
+
+            if has_metadata_col:
+                metadata_json = json.dumps(metadata) if metadata else None
+                cursor.execute(f'''
+                    INSERT INTO paper_trading_metrics (
+                        timestamp, exchange, executed, reason, signal,
+                        confidence, quantity_lots, pnl, constraint_violation,
+                        metadata, created_at
+                    ) VALUES ({', '.join([ph]*11)})
+                ''', (
+                    _coerce_iso_timestamp(timestamp),
+                    exchange,
+                    bool(executed),
+                    reason,
+                    signal,
+                    float(confidence) if confidence is not None else None,
+                    int(quantity_lots) if quantity_lots is not None else 0,
+                    float(pnl) if pnl is not None else None,
+                    bool(constraint_violation),
+                    metadata_json,
+                    _coerce_iso_timestamp(now_ist())
+                ))
+            else:
+                cursor.execute(f'''
+                    INSERT INTO paper_trading_metrics (
+                        timestamp, exchange, executed, reason, signal,
+                        confidence, quantity_lots, pnl, constraint_violation,
+                        created_at
+                    ) VALUES ({', '.join([ph]*10)})
+                ''', (
+                    _coerce_iso_timestamp(timestamp),
+                    exchange,
+                    bool(executed),
+                    reason,
+                    signal,
+                    float(confidence) if confidence is not None else None,
+                    int(quantity_lots) if quantity_lots is not None else 0,
+                    float(pnl) if pnl is not None else None,
+                    bool(constraint_violation),
+                    _coerce_iso_timestamp(now_ist())
+                ))
             conn.commit()
             release_db_connection(conn)
         except Exception as exc:

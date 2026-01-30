@@ -167,8 +167,9 @@ class Phase2MetricsCollector:
         quantity_lots: int = 0,
         pnl: Optional[float] = None,
         constraint_violation: bool = False,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Record paper trading execution metrics."""
+        """Record paper trading execution metrics. metadata (e.g. itm_bearish_signal, signal_id) is stored in DB when column exists."""
         ts = now_ist()
         entry = {
             'timestamp': ts.isoformat(),
@@ -180,6 +181,8 @@ class Phase2MetricsCollector:
             'pnl': pnl,
             'constraint_violation': constraint_violation,
         }
+        if metadata is not None:
+            entry['metadata'] = metadata
         self.paper_trading_buffer.append(entry)
         self._append_to_file('paper_trading', entry)
         # Also persist to the relational database for long-term analytics
@@ -194,6 +197,7 @@ class Phase2MetricsCollector:
                 quantity_lots=quantity_lots,
                 pnl=pnl,
                 constraint_violation=constraint_violation,
+                metadata=metadata,
             )
         except Exception as exc:
             LOGGER.debug(f"Failed to persist paper trading metric to DB: {exc}")
