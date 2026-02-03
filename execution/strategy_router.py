@@ -20,6 +20,7 @@ try:
     from strategies.oi_buildup import OIBuildupStrategy
     from strategies.vol_expansion import VolatilityExpansionStrategy
     from strategies.expiry_pin import ExpiryPinStrategy
+    from strategies.next_oi_direction import NextOIDirectionStrategy
     STRATEGIES_AVAILABLE = True
 except ImportError as e:
     logging.getLogger(__name__).warning(f"Strategy imports failed: {e}")
@@ -72,7 +73,8 @@ class AdvancedStrategyRouter:
                 'gamma_scalping': GammaScalpingStrategy(),
                 'oi_buildup': OIBuildupStrategy(),
                 'vol_expansion': VolatilityExpansionStrategy(),
-                'expiry_pin': ExpiryPinStrategy()
+                'expiry_pin': ExpiryPinStrategy(),
+                'next_oi_direction': NextOIDirectionStrategy(),
             }
         else:
             self.strategies = {}
@@ -278,9 +280,18 @@ class AdvancedStrategyRouter:
 
         # Routing Logic
         selected_strategy = None
-        
+        oi_sentiment = features.get('oi_next_sentiment')
+        try:
+            sentiment_mag = abs(float(oi_sentiment)) if oi_sentiment is not None else 0.0
+        except (TypeError, ValueError):
+            sentiment_mag = 0.0
+
         if horizon == 'expiry':
             selected_strategy = self.strategies.get('expiry_pin')
+
+        elif horizon == 'intraday' and sentiment_mag > 0:
+            # Next-expiry OI direction (analysis-backed: CE/PE buildup -> BUY/SELL)
+            selected_strategy = self.strategies.get('next_oi_direction')
             
         elif regime == 'low_vol' and horizon == 'intraday':
             selected_strategy = self.strategies.get('gamma_scalping')
@@ -291,6 +302,13 @@ class AdvancedStrategyRouter:
         elif features.get('is_squeeze', False) or features.get('bb_width', 1.0) < 0.15:
             # Detect squeeze condition implicitly if not passed
             selected_strategy = self.strategies.get('vol_expansion')
+
+        # If next_oi_direction was not selected (e.g. sentiment zero) but intraday, fall back to regime
+        if selected_strategy is None and horizon == 'intraday':
+            if regime == 'low_vol':
+                selected_strategy = self.strategies.get('gamma_scalping')
+            elif regime in ['trending_up', 'trending_down']:
+                selected_strategy = self.strategies.get('oi_buildup')
             
         # Fallback / Default
         if selected_strategy:

@@ -12,7 +12,7 @@ import argparse
 import json
 import logging
 import warnings
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple, Any
 
@@ -44,6 +44,19 @@ from feature_engineering import (
     REQUIRED_FEATURE_COLUMNS,
     prepare_training_features,
 )
+
+# Next-expiry option chain features: always include in training (trade-log optimization plan).
+# Ensures nse_next_* and oi_next_sentiment are never dropped by SelectFromModel.
+FORCE_INCLUDE_FEATURES = [
+    'nse_next_oi_call_total', 'nse_next_oi_put_total',
+    'nse_next_oi_change_call_total', 'nse_next_oi_change_put_total',
+    'nse_next_volume_call_total', 'nse_next_volume_put_total',
+    'nse_next_oi_change_diff_put_call', 'oi_next_sentiment',
+]
+
+# Loss-like hours (trade-log analysis: more losses at these entry hours). Upweight in training.
+LOSS_LIKE_HOURS = [9, 10, 12, 13, 14, 15]
+SAMPLE_WEIGHT_BOOST = 0.3  # Add this to weight (1.0 + BOOST) for loss-like hours
 try:
     from model_registry import ModelRegistry
     MODEL_REGISTRY_AVAILABLE = True
@@ -402,6 +415,32 @@ def define_triple_barrier_target(
     logging.info(f"Target Distribution:\n{pd.Series(target).value_counts(normalize=True)}")
     return data
 
+
+def _apply_force_include_after_selection(
+    selector: Any,
+    X_train_feats: pd.DataFrame,
+    X_test_feats: pd.DataFrame,
+    X_train_sel: np.ndarray,
+    X_test_sel: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Add back FORCE_INCLUDE_FEATURES (next-expiry) if selector dropped them.
+    Returns (X_train_sel_new, X_test_sel_new) with same column order: selected + force_add.
+    """
+    support = selector.get_support()
+    all_names = list(X_train_feats.columns)
+    selected_names = [all_names[i] for i in range(len(support)) if support[i]]
+    force_add = [f for f in FORCE_INCLUDE_FEATURES if f in all_names and f not in selected_names]
+    if not force_add:
+        return X_train_sel, X_test_sel
+    X_train_extra = X_train_feats[force_add].values
+    X_test_extra = X_test_feats[force_add].values
+    X_train_sel_new = np.hstack([X_train_sel, X_train_extra])
+    X_test_sel_new = np.hstack([X_test_sel, X_test_extra])
+    logging.info(f"Force-included {len(force_add)} next-expiry features: {force_add}")
+    return X_train_sel_new, X_test_sel_new
+
+
 def train_regime_aware_model(
     df: pd.DataFrame,
     feature_cols: List[str],
@@ -480,7 +519,19 @@ def train_regime_aware_model(
         X_train_sel = selector.transform(X_train_feats)
         X_test_sel = selector.transform(X_test_feats)
         
+        # Force-include next-expiry features (nse_next_*, oi_next_sentiment) if selector dropped them
+        X_train_sel, X_test_sel = _apply_force_include_after_selection(
+            selector, X_train_feats, X_test_feats, X_train_sel, X_test_sel
+        )
+        
         logging.info(f"Fold {fold+1}: Selected {X_train_sel.shape[1]} features from {X_train_feats.shape[1]} original features")
+        
+        # Sample weights: upweight loss-like hours (trade-log analysis)
+        sample_weight_train = np.ones(len(y_train), dtype=np.float64)
+        if 'hour' in X_train_raw.columns:
+            loss_like = X_train_raw['hour'].isin(LOSS_LIKE_HOURS).values
+            sample_weight_train += SAMPLE_WEIGHT_BOOST * loss_like
+            logging.info(f"Fold {fold+1}: Sample weights applied (loss-like hours {LOSS_LIKE_HOURS}, boost {SAMPLE_WEIGHT_BOOST})")
         
         # Check target distribution
         unique_targets, counts = np.unique(y_train, return_counts=True)
@@ -501,16 +552,18 @@ def train_regime_aware_model(
             X_val_split = X_train_sel[split_idx:]
             y_train_split = y_train[:split_idx]
             y_val_split = y_train[split_idx:]
+            sw_split = sample_weight_train[:split_idx]
             
             clf.fit(
                 X_train_split, y_train_split,
+                sample_weight=sw_split,
                 eval_set=[(X_val_split, y_val_split)],
                 callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)]
             )
         else:
             # For small datasets, just fit without early stopping
             print(f"DEBUG: Fold {fold+1}: Fitting without early stopping (train size <= 1000)...")
-            clf.fit(X_train_sel, y_train)
+            clf.fit(X_train_sel, y_train, sample_weight=sample_weight_train)
         
         print(f"DEBUG: Fold {fold+1}: Model training complete. Making predictions...")
         preds = clf.predict(X_test_sel)
@@ -753,7 +806,11 @@ def final_training_run(exchange: str, df: pd.DataFrame, feature_cols: List[str])
     print(f"DEBUG: Final training - Training base model for feature selection on {len(y_full)} samples...")
     logging.info(f"Training base model for feature selection on {len(y_full)} samples...")
     base_model = lgb.LGBMClassifier(n_estimators=50, random_state=42, verbosity=-1, force_col_wise=True)  # Reduced for speed
-    base_model.fit(X_full, y_full)
+    sample_weight_full = np.ones(len(y_full), dtype=np.float64)
+    if 'hour' in df.columns:
+        sample_weight_full += SAMPLE_WEIGHT_BOOST * df['hour'].isin(LOSS_LIKE_HOURS).values
+        logging.info("Final training: sample weights applied (loss-like hours)")
+    base_model.fit(X_full, y_full, sample_weight=sample_weight_full)
     print("DEBUG: Final training - Base model training complete.")
 
     # Log and persist global feature importances prior to selector thresholding
@@ -769,6 +826,14 @@ def final_training_run(exchange: str, df: pd.DataFrame, feature_cols: List[str])
     selector = SelectFromModel(base_model, threshold='median', prefit=True)
     
     X_full_sel = selector.transform(X_full)
+    # Force-include next-expiry features for regime models (same logic as CV)
+    support = selector.get_support()
+    all_names = list(X_full.columns)
+    selected_names = [all_names[i] for i in range(len(support)) if support[i]]
+    force_add = [f for f in FORCE_INCLUDE_FEATURES if f in all_names and f not in selected_names]
+    if force_add:
+        X_full_sel = np.hstack([X_full_sel, X_full[force_add].values])
+        logging.info(f"Final training: force-included {len(force_add)} next-expiry features: {force_add}")
     logging.info(f"Selected {X_full_sel.shape[1]} features from {len(feature_cols)} original features")
     
     unique_regimes = np.unique(regimes)
@@ -784,7 +849,12 @@ def final_training_run(exchange: str, df: pd.DataFrame, feature_cols: List[str])
             continue
         
         X_r = selector.transform(df.loc[mask, feature_cols])
+        if force_add:
+            X_r = np.hstack([X_r, df.loc[mask, force_add].values])
         y_r = df.loc[mask, 'target']
+        sample_weight_r = np.ones(regime_count, dtype=np.float64)
+        if 'hour' in df.columns:
+            sample_weight_r += SAMPLE_WEIGHT_BOOST * df.loc[mask, 'hour'].isin(LOSS_LIKE_HOURS).values
         
         # Check target distribution for this regime
         unique_targets, counts = np.unique(y_r, return_counts=True)
@@ -801,14 +871,16 @@ def final_training_run(exchange: str, df: pd.DataFrame, feature_cols: List[str])
             X_r_val = X_r[split_idx:]
             y_r_train = y_r[:split_idx]
             y_r_val = y_r[split_idx:]
+            sw_r_train = sample_weight_r[:split_idx]
             
             model.fit(
                 X_r_train, y_r_train,
+                sample_weight=sw_r_train,
                 eval_set=[(X_r_val, y_r_val)],
                 callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)]
             )
         else:
-            model.fit(X_r, y_r)
+            model.fit(X_r, y_r, sample_weight=sample_weight_r)
         
         regime_models[int(r)] = model
         logging.info(f"✓ Regime {r} model trained on {regime_count} samples.")
@@ -856,11 +928,31 @@ def final_training_run(exchange: str, df: pd.DataFrame, feature_cols: List[str])
         'expiry_transformer': model_dir / 'expiry_transformer.pt' if (model_dir / 'expiry_transformer.pt').exists() else None
     }
 
-def train(exchange: str, days: int = 90):
-    # End date set to tomorrow to include all of today's data
-    end_date = today_ist() + timedelta(days=1)
-    start_date = today_ist() - timedelta(days=days)
-    
+def train(
+    exchange: str,
+    days: int = 90,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+):
+    """
+    Train regime-aware LightGBM models for the given exchange.
+
+    Either (start_date, end_date) or days must be used:
+    - If start_date and end_date are both provided, load data for that range.
+    - Otherwise use days: load from (today - days) to (today + 1).
+    """
+    if start_date is not None and end_date is not None:
+        start_date = start_date if isinstance(start_date, date) else pd.Timestamp(start_date).date()
+        end_date = end_date if isinstance(end_date, date) else pd.Timestamp(end_date).date()
+        if end_date < start_date:
+            raise ValueError("end_date must be >= start_date")
+        logging.info(f"Training on date range: {start_date} to {end_date}")
+    else:
+        # End date set to tomorrow to include all of today's data
+        end_date = today_ist().date() + timedelta(days=1)
+        start_date = today_ist().date() - timedelta(days=days)
+        logging.info(f"Training on last {days} days: {start_date} to {end_date}")
+
     # 1. Load Data
     logging.info(f"Loading data from {start_date} to {end_date} for {exchange}...")
     print(f"DEBUG: Loading data from {start_date} to {end_date} for {exchange}...")
@@ -933,7 +1025,7 @@ def train(exchange: str, days: int = 90):
                         str(model_paths.get('model_features', '')),
                         str(model_paths.get('swing_ensemble', ''))
                     ],
-                    notes=f"Trained with {days} days of data, {len(feature_cols)} features"
+                    notes=f"Trained {start_date} to {end_date}, {len(feature_cols)} features"
                 )
                 logging.info("✓ Model registered in model registry")
                 print("DEBUG: Main LightGBM model registered.")
@@ -976,10 +1068,26 @@ def train(exchange: str, days: int = 90):
     
     print("DEBUG: Training pipeline complete!")
 
+def _parse_date(s: str) -> date:
+    """Parse YYYY-MM-DD to date."""
+    return datetime.strptime(s, "%Y-%m-%d").date()
+
+
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Train regime-aware LightGBM models. Use --start/--end for a fixed date range, or --days for rolling window."
+    )
     parser.add_argument('--exchange', required=True, choices=['NSE', 'BSE'])
-    parser.add_argument('--days', type=int, default=90)
+    parser.add_argument('--days', type=int, default=90, help='Days of history when not using --start/--end')
+    parser.add_argument('--start', type=str, default=None, help='Training start date (YYYY-MM-DD). Requires --end.')
+    parser.add_argument('--end', type=str, default=None, help='Training end date (YYYY-MM-DD). Requires --start.')
     args = parser.parse_args()
-    
-    train(args.exchange, args.days)
+
+    start_d, end_d = None, None
+    if args.start or args.end:
+        if not args.start or not args.end:
+            parser.error("Both --start and --end are required for date-range training.")
+        start_d = _parse_date(args.start)
+        end_d = _parse_date(args.end)
+
+    train(args.exchange, days=args.days, start_date=start_d, end_date=end_d)

@@ -99,6 +99,46 @@ class TradeRecord:
         return payload
 
 
+def _build_daily_summary(trades: List[TradeRecord]) -> List[Dict[str, Any]]:
+    """
+    Group trades by date and compute per-day: target_hits (win), stop_losses (loss),
+    breakeven count, total_net_pnl, total_gross_pnl.
+    """
+    from collections import defaultdict
+    by_date: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
+        "date": "",
+        "num_trades": 0,
+        "target_hits": 0,
+        "stop_losses": 0,
+        "breakeven": 0,
+        "total_net_pnl": 0.0,
+        "total_gross_pnl": 0.0,
+    })
+    for t in trades:
+        ts = t.timestamp
+        if isinstance(ts, str):
+            date_key = ts.split(" ")[0] if " " in ts else ts[:10]
+        else:
+            date_key = str(ts)[:10]
+        by_date[date_key]["date"] = date_key
+        by_date[date_key]["num_trades"] += 1
+        by_date[date_key]["total_net_pnl"] += t.net_pnl
+        by_date[date_key]["total_gross_pnl"] += t.gross_pnl
+        if t.net_pnl > 0:
+            by_date[date_key]["target_hits"] += 1
+        elif t.net_pnl < 0:
+            by_date[date_key]["stop_losses"] += 1
+        else:
+            by_date[date_key]["breakeven"] += 1
+    out = []
+    for _, v in sorted(by_date.items()):
+        d = dict(v)
+        d["total_net_pnl"] = round(d["total_net_pnl"], 2)
+        d["total_gross_pnl"] = round(d["total_gross_pnl"], 2)
+        out.append(d)
+    return out
+
+
 @dataclass
 class BacktestResult:
     config: BacktestConfig
@@ -107,6 +147,7 @@ class BacktestResult:
     equity_curve: List[Dict[str, float]]
     raw_rows: int = 0
     monte_carlo_report: Optional[Dict[str, Any]] = None
+    daily_summary: Optional[List[Dict[str, Any]]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         from datetime import datetime
@@ -119,6 +160,7 @@ class BacktestResult:
             "metrics": self.metrics,
             "equity_curve": self.equity_curve,
             "trades": [trade.to_dict() for trade in self.trades],
+            "daily_summary": self.daily_summary or [],
             "raw_rows": self.raw_rows,
             "monte_carlo_report": self.monte_carlo_report,
             "generated_at": datetime.now().isoformat(),
@@ -143,11 +185,11 @@ class BacktestEngine:
         frame = self._prepare_frame()
         if frame.empty:
             LOGGER.warning("No data available for %s between %s and %s", self.config.exchange, self.config.start, self.config.end)
-            return BacktestResult(self.config, [], {}, [], raw_rows=0)
+            return BacktestResult(self.config, [], {}, [], raw_rows=0, daily_summary=[])
 
         if not self.signal_engine.models_loaded:
             LOGGER.error("Models not loaded for exchange %s. Aborting backtest.", self.config.exchange)
-            return BacktestResult(self.config, [], {}, [], raw_rows=len(frame))
+            return BacktestResult(self.config, [], {}, [], raw_rows=len(frame), daily_summary=[])
 
         LOGGER.warning("Starting backtest: %d rows, min_confidence=%.2f", len(frame), self.config.min_confidence)
 
@@ -333,8 +375,14 @@ class BacktestEngine:
                 stats['trades']
             )
 
+        # Build daily summary (target hits vs stop losses, total PnL per day)
+        daily_summary = _build_daily_summary(trades)
+
         # Run Monte Carlo Simulation
-        result = BacktestResult(self.config, trades, metrics, equity_curve, raw_rows=len(frame))
+        result = BacktestResult(
+            self.config, trades, metrics, equity_curve,
+            raw_rows=len(frame), daily_summary=daily_summary
+        )
         
         LOGGER.warning("Backtest completed: %d trades generated", len(trades))
         

@@ -50,7 +50,12 @@ os.environ.setdefault('NUMEXPR_NUM_THREADS', '1')
 
 import database_new as db
 from feature_engineering import FeatureEngineeringError, REQUIRED_FEATURE_COLUMNS, prepare_training_features
-from train_model import RegimeHMMTransformer, define_triple_barrier_target
+from train_model import (
+    LOSS_LIKE_HOURS,
+    RegimeHMMTransformer,
+    SAMPLE_WEIGHT_BOOST,
+    define_triple_barrier_target,
+)
 from time_utils import today_ist, now_ist
 
 try:  # Optional dependencies with graceful degradation
@@ -479,6 +484,18 @@ def _prepare_xy(frame: pd.DataFrame, features: Sequence[str], encode_labels: boo
     return X, y
 
 
+def _sample_weights_for_loss_like_hours(frame: pd.DataFrame) -> Optional[np.ndarray]:
+    """
+    Build sample weights: upweight loss-like hours (trade-log optimization, same as train_model.py).
+    Returns None if 'hour' not in frame (no weighting).
+    """
+    if 'hour' not in frame.columns or not len(frame):
+        return None
+    w = np.ones(len(frame), dtype=np.float64)
+    w += SAMPLE_WEIGHT_BOOST * frame['hour'].isin(LOSS_LIKE_HOURS).values
+    return w
+
+
 class GymTradingEnvironmentWrapper(_GymEnv if _GymEnv else object):
     """
     Wrapper to make TradingEnvironment compatible with stable-baselines3 Gym interface.
@@ -872,6 +889,7 @@ def _run_optuna(
     y_val: np.ndarray,
     base_params: Dict[str, Any],
     trials: int,
+    sample_weight_train: Optional[np.ndarray] = None,
 ) -> Tuple[Dict[str, Any], Optional[float]]:
     if trials <= 0 or optuna is None:
         return base_params, None
@@ -885,7 +903,10 @@ def _run_optuna(
         params = base_params.copy()
         params.update(family.optuna_space(trial))
         model = family.build_model(params)
-        model.fit(X_train, y_train_encoded)
+        if sample_weight_train is not None:
+            model.fit(X_train, y_train_encoded, sample_weight=sample_weight_train)
+        else:
+            model.fit(X_train, y_train_encoded)
         preds = model.predict(X_val)
         # Decode predictions if we encoded labels
         if needs_encoding:
@@ -1014,12 +1035,19 @@ def run_orchestrator(config: OrchestratorConfig) -> Dict[str, Any]:
                 # XGBoost and CatBoost require labels starting from 0
                 needs_encoding = family.name in ("xgboost", "catboost")
                 y_train_encoded = _encode_labels(y_train) if needs_encoding else y_train
-                
+                sample_weight_train = _sample_weights_for_loss_like_hours(train_df)
+
                 base_params = family.default_params()
-                tuned_params, optuna_score = _run_optuna(family, X_train, y_train, X_val, y_val, base_params, config.optuna_trials)
+                tuned_params, optuna_score = _run_optuna(
+                    family, X_train, y_train, X_val, y_val, base_params, config.optuna_trials,
+                    sample_weight_train=sample_weight_train,
+                )
 
                 model = family.build_model(tuned_params)
-                model.fit(X_train, y_train_encoded)
+                if sample_weight_train is not None:
+                    model.fit(X_train, y_train_encoded, sample_weight=sample_weight_train)
+                else:
+                    model.fit(X_train, y_train_encoded)
                 preds = model.predict(X_val)
                 
                 # Decode predictions if we encoded labels
@@ -1213,6 +1241,9 @@ def _save_best_model(
         # Encode labels for XGBoost/CatBoost
         needs_encoding = best_family.name in ("xgboost", "catboost")
         y_all_encoded = _encode_labels(y_all) if needs_encoding else y_all
+        sample_weight_all = _sample_weights_for_loss_like_hours(frame_with_regime)
+        if sample_weight_all is not None:
+            LOGGER.info("Final training: sample weights applied (loss-like hours, same as train_model.py)")
         
         # Train final model
         if best_family.name == "rl":
@@ -1225,7 +1256,10 @@ def _save_best_model(
             LOGGER.info(f"Training {best_family_name} model on all {len(X_all)} samples...")
             # Train tree-based model on all data
             final_model = best_family.build_model(best_params)
-            final_model.fit(X_all, y_all_encoded)
+            if sample_weight_all is not None:
+                final_model.fit(X_all, y_all_encoded, sample_weight=sample_weight_all)
+            else:
+                final_model.fit(X_all, y_all_encoded)
             
             # Save model artifacts
             model_dir = Path("models") / config.exchange
