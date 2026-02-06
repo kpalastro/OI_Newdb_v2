@@ -1732,6 +1732,25 @@ def feature_result_consumer():
                             if selection is not None:
                                 symbol, option_type, current_price = selection
 
+                                # Use fresh LTP from Kite websocket at execution time (fix stale snapshot entry price)
+                                token = None
+                                for opt in (result.calls or []) + (result.puts or []):
+                                    if opt.get('symbol') == symbol:
+                                        token = opt.get('token')
+                                        break
+                                if token is not None:
+                                    with handler.lock:
+                                        tick = handler.latest_tick_data.get(token, {})
+                                    fresh_ltp = normalize_price(tick.get('last_price')) if tick else None
+                                    if fresh_ltp is not None:
+                                        try:
+                                            current_price = float(fresh_ltp)
+                                            logging.debug(
+                                                f"[{result.exchange}] Using fresh LTP for {symbol}: {current_price:.2f} (was snapshot)"
+                                            )
+                                        except (TypeError, ValueError):
+                                            pass
+
                                 # Build unified strategy signal
                                 strategy_signal = StrategySignal(
                                     signal=result.ml_signal,
