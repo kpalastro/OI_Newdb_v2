@@ -1731,6 +1731,11 @@ def feature_result_consumer():
                             )
                             if selection is not None:
                                 symbol, option_type, current_price = selection
+                                # Use real-time LTP for realistic paper-trade entry price (not stale snapshot)
+                                options_exchange = handler.config.get('options_exchange', 'NFO')
+                                realtime_ltp = get_realtime_ltp_for_symbol(handler, symbol, options_exchange)
+                                if realtime_ltp is not None:
+                                    current_price = float(realtime_ltp)
 
                                 # Build unified strategy signal
                                 strategy_signal = StrategySignal(
@@ -1754,7 +1759,6 @@ def feature_result_consumer():
                                 }
 
                                 # Get lot size from instrument list for accurate quantity calculation
-                                options_exchange = handler.config.get('options_exchange', 'NFO')
                                 lot_size = get_lot_size_for_symbol(handler, symbol, options_exchange)
 
                                 position = executor.execute_paper_trade(
@@ -2708,14 +2712,16 @@ def get_trade_log_filename() -> Path:
     return TRADE_LOG_DIR / f"trades_{today_ist():%Y-%m-%d}.csv"
 
 def _perform_log_trade_entry(position: dict):
-    """Log new trade entry to CSV."""
+    """Log new trade entry to CSV. Uses position's entry_time for realistic buy timestamp."""
     try:
         filepath = get_trade_log_filename()
         # Extract entry_reason, defaulting to 'Manual' if not present
         entry_reason = position.get('entry_reason', 'Manual')
+        # Use position's entry_time (set at execution) for realistic buy recording
+        entry_ts = position.get('entry_time') or now_ist().strftime('%Y-%m-%d %H:%M:%S')
         
         log_entry = {
-            'entry_timestamp': now_ist().strftime('%Y-%m-%d %H:%M:%S'),
+            'entry_timestamp': entry_ts,
             'exit_timestamp': None,
             'exchange': position['exchange'],
             'position_id': position['id'],
@@ -2742,13 +2748,17 @@ def _perform_log_trade_entry(position: dict):
     except Exception as e:
         logging.error(f"Failed to log trade entry: {e}")
 
-def _perform_log_trade_exit(position_id: str, exit_reason: str, 
-                           exit_price: float, realized_pnl: float):
-    """Update trade log with exit details."""
+def _perform_log_trade_exit(position_id: str, exit_reason: str,
+                           exit_price: float, realized_pnl: float,
+                           exit_timestamp: Optional[str] = None):
+    """Update trade log with exit details. Uses provided exit_timestamp for realistic sell recording."""
     try:
         filepath = get_trade_log_filename()
         if not filepath.exists():
             return
+        
+        # Use provided exit time (moment of close) for realistic sell recording
+        exit_ts = exit_timestamp or now_ist().strftime('%Y-%m-%d %H:%M:%S')
         
         with trade_log_lock:
             # Use pandas for robust CSV handling
@@ -2769,7 +2779,7 @@ def _perform_log_trade_exit(position_id: str, exit_reason: str,
             df.loc[mask, 'exit_reason'] = exit_reason
             df.loc[mask, 'exit_price'] = round(exit_price, 2)
             df.loc[mask, 'pnl'] = round(realized_pnl, 2)
-            df.loc[mask, 'exit_timestamp'] = now_ist().strftime('%Y-%m-%d %H:%M:%S')
+            df.loc[mask, 'exit_timestamp'] = exit_ts
             
             # Ensure all required columns exist (for backward compatibility with old CSV files)
             for col in TRADE_LOG_COLUMNS:
@@ -2812,7 +2822,10 @@ def io_writer_thread_func():
             elif task_type == 'log_trade_entry':
                 _perform_log_trade_entry(data)
             elif task_type == 'log_trade_exit':
-                _perform_log_trade_exit(**data)
+                _perform_log_trade_exit(
+                    data['position_id'], data['exit_reason'], data['exit_price'], data['realized_pnl'],
+                    data.get('exit_timestamp')
+                )
             
             io_queue.task_done()
         except Empty:
@@ -2848,14 +2861,16 @@ def schedule_log_trade_entry(position: dict):
     """Schedule trade entry logging."""
     io_queue.put(('log_trade_entry', position))
 
-def schedule_log_trade_exit(position_id: str, exit_reason: str, exit_price: float, realized_pnl: float):
-    """Schedule trade exit logging."""
+def schedule_log_trade_exit(position_id: str, exit_reason: str, exit_price: float, realized_pnl: float,
+                            exit_timestamp: Optional[str] = None):
+    """Schedule trade exit logging. Pass exit_timestamp for realistic sell recording."""
     payload = {
         'position_id': position_id,
         'exit_reason': exit_reason,
         'exit_price': exit_price,
-        'realized_pnl': realized_pnl
-    }
+        'realized_pnl': realized_pnl,
+        'exit_timestamp': exit_timestamp,
+        }
     io_queue.put(('log_trade_exit', payload))
 
 # ==============================================================================
@@ -2873,6 +2888,22 @@ def get_instrument_token_for_symbol(instruments: list, symbol: str, exchange: st
     except Exception as e:
         logging.error(f"Error finding token for {symbol}: {e}")
         return None
+
+
+def get_realtime_ltp_for_symbol(handler: ExchangeDataHandler, symbol: str, options_exchange: str) -> Optional[float]:
+    """Get real-time LTP for a symbol from the handler's tick-updated option_price_cache.
+    Use this for realistic paper-trade entry/exit prices instead of stale snapshot prices.
+    Caller must not hold handler.lock if this acquires it (to avoid deadlock)."""
+    try:
+        with handler.lock:
+            token = get_instrument_token_for_symbol(handler.instrument_list, symbol, options_exchange)
+            if token is None:
+                return None
+            return handler.option_price_cache.get(token)
+    except Exception as e:
+        logging.debug(f"get_realtime_ltp_for_symbol({symbol}): {e}")
+        return None
+
 
 def get_lot_size_for_symbol(handler: ExchangeDataHandler, symbol: str, exchange: str) -> int:
     """Get lot size for a symbol from instrument list.
@@ -3898,12 +3929,22 @@ def monitor_positions(handler: ExchangeDataHandler, call_options: list, put_opti
                         exit_reason = f"Stop Loss (+{stop_loss_points})"
                 
                 if exit_reason:
-                    positions_to_close.append((pos_id, exit_reason, price, mtm))
+                    # Store symbol, side, entry_price, qty so we can use realtime LTP and recalc pnl outside lock
+                    positions_to_close.append((
+                        pos_id, exit_reason, price, mtm,
+                        pos['symbol'], pos['side'], pos['entry_price'], pos['qty']
+                    ))
             
             handler.total_mtm = round(cumulative_mtm, 2)
         
-        # Close positions outside lock
-        for pos_id, reason, price, pnl in positions_to_close:
+        options_exchange = handler.config.get('options_exchange', 'NFO')
+        # Close positions outside lock; use real-time LTP for exit price when available
+        for item in positions_to_close:
+            pos_id, reason, price, pnl, symbol, side, entry_price, qty = item
+            realtime_ltp = get_realtime_ltp_for_symbol(handler, symbol, options_exchange)
+            if realtime_ltp is not None:
+                price = float(realtime_ltp)
+                pnl = (price - entry_price if side == 'B' else entry_price - price) * qty
             close_position(handler, pos_id, reason, price, pnl)
         
         # Log EOD exit if triggered
@@ -3953,7 +3994,7 @@ def _exit_conflicting_positions_on_signal_flip(
             if opt.get('ltp') is not None
         }
 
-        positions_to_close: List[Tuple[str, str, float, float]] = []
+        positions_to_close: List[Tuple] = []
 
         with handler.lock:
             for pos_id, pos in list(handler.open_positions.items()):
@@ -3996,10 +4037,19 @@ def _exit_conflicting_positions_on_signal_flip(
                     mtm = (price - entry_price) * qty
 
                 exit_reason = f"Signal Flip ({pos_dir} → {new_ml_signal})"
-                positions_to_close.append((pos_id, exit_reason, float(price), float(mtm)))
+                positions_to_close.append((
+                    pos_id, exit_reason, float(price), float(mtm),
+                    symbol, pos.get('side', 'B'), entry_price, qty
+                ))
 
-        # Close conflicting positions outside the lock
-        for pos_id, reason, price, pnl in positions_to_close:
+        # Close conflicting positions outside the lock; use real-time LTP for exit price when available
+        options_exchange = handler.config.get('options_exchange', 'NFO')
+        for item in positions_to_close:
+            pos_id, reason, price, pnl, symbol, side, entry_price, qty = item
+            realtime_ltp = get_realtime_ltp_for_symbol(handler, symbol, options_exchange)
+            if realtime_ltp is not None:
+                price = float(realtime_ltp)
+                pnl = (price - entry_price if side == 'B' else entry_price - price) * qty
             close_position(handler, pos_id, reason, price, pnl)
 
         if positions_to_close:
@@ -4014,10 +4064,11 @@ def _exit_conflicting_positions_on_signal_flip(
             exc_info=True,
         )
 
-def close_position(handler: ExchangeDataHandler, pos_id: str, exit_reason: str, 
+def close_position(handler: ExchangeDataHandler, pos_id: str, exit_reason: str,
                   exit_price: float, realized_pnl: float):
-    """Close a position and log it."""
+    """Close a position and log it. Uses current time as exit_timestamp for realistic sell recording."""
     try:
+        exit_ts = now_ist().strftime('%Y-%m-%d %H:%M:%S')
         with handler.lock:
             if pos_id not in handler.open_positions:
                 return
@@ -4025,8 +4076,8 @@ def close_position(handler: ExchangeDataHandler, pos_id: str, exit_reason: str,
             position = handler.open_positions.pop(pos_id)
             handler.closed_positions_pnl += realized_pnl
         
-        # Log exit to trade logs
-        schedule_log_trade_exit(pos_id, exit_reason, exit_price, realized_pnl)
+        # Log exit to trade logs with real-time exit price and timestamp
+        schedule_log_trade_exit(pos_id, exit_reason, exit_price, realized_pnl, exit_timestamp=exit_ts)
 
         # Record Phase 2 paper trading metrics for realised PnL
         try:
@@ -4520,6 +4571,15 @@ def place_order():
             return jsonify({'success': False, 'error': 'Invalid exchange'}), 400
         
         handler = exchange_handlers[exchange]
+        symbol = data.get('symbol')
+        options_exchange = handler.config.get('options_exchange', 'NFO')
+        # Use real-time LTP for realistic paper-trade entry price (not stale UI price)
+        entry_price = get_realtime_ltp_for_symbol(handler, symbol, options_exchange)
+        if entry_price is None:
+            entry_price = float(data.get('price', 0))
+        else:
+            entry_price = float(entry_price)
+        entry_time_str = now_ist().strftime('%Y-%m-%d %H:%M:%S')
         
         with handler.lock:
             handler.position_counter += 1
@@ -4527,13 +4587,13 @@ def place_order():
             
             position = {
                 'id': pos_id,
-                'symbol': data.get('symbol'),
+                'symbol': symbol,
                 'type': data.get('type'),
                 'side': data.get('side'),
-                'entry_price': float(data.get('price')),
+                'entry_price': entry_price,
                 'qty': int(data.get('qty', 300)),
-                'entry_time': now_ist().strftime('%Y-%m-%d %H:%M:%S'),
-                'current_price': float(data.get('price')),
+                'entry_time': entry_time_str,
+                'current_price': entry_price,
                 'mtm': 0.0,
                 'exchange': exchange
             }
