@@ -62,7 +62,6 @@ try:
     MODEL_REGISTRY_AVAILABLE = True
 except ImportError:
     MODEL_REGISTRY_AVAILABLE = False
-    logging.warning("model_registry not available. Model registration will be skipped.")
 
 # Suppress warnings for cleaner logs
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -949,8 +948,8 @@ def train(
         logging.info(f"Training on date range: {start_date} to {end_date}")
     else:
         # End date set to tomorrow to include all of today's data
-        end_date = today_ist().date() + timedelta(days=1)
-        start_date = today_ist().date() - timedelta(days=days)
+        end_date = today_ist() + timedelta(days=1)
+        start_date = today_ist() - timedelta(days=days)
         logging.info(f"Training on last {days} days: {start_date} to {end_date}")
 
     # 1. Load Data
@@ -967,9 +966,9 @@ def train(
     df = prepare_training_features(raw_data, REQUIRED_FEATURE_COLUMNS)
     print(f"DEBUG: Feature preparation complete. DataFrame shape: {df.shape}")
     
-    # 3. Define Target
+    # 3. Define Target (look_forward=9 bars for triple-barrier labeling)
     print("DEBUG: Defining target...")
-    df = define_triple_barrier_target(df)
+    df = define_triple_barrier_target(df, look_forward=9)
     print(f"DEBUG: Target defined. DataFrame shape: {df.shape}")
     
     # 4. Validate (CV)
@@ -996,6 +995,8 @@ def train(
     print("DEBUG: Final training complete.")
     
     # 6. Register models in registry
+    if not MODEL_REGISTRY_AVAILABLE:
+        logging.info("Model registry not available; skipping model registration.")
     if MODEL_REGISTRY_AVAILABLE:
         print("DEBUG: Registering models in model registry...")
         try:

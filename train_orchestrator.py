@@ -475,6 +475,34 @@ def _decode_labels(y: np.ndarray) -> np.ndarray:
     return y_decoded.astype(int)
 
 
+def _drop_zero_variance_features(frame: pd.DataFrame, feature_cols: List[str], min_variance: float = 1e-8) -> List[str]:
+    """
+    Remove features that are constant (zero or near-zero variance) in the frame.
+    Reduces training time and can improve model by avoiding useless/noise features.
+    """
+    if not frame.size or not feature_cols:
+        return feature_cols
+    kept = []
+    dropped = []
+    for col in feature_cols:
+        if col not in frame.columns:
+            continue
+        try:
+            var = frame[col].astype(np.float64).var()
+            if var is not None and not (np.isnan(var) or var < min_variance):
+                kept.append(col)
+            else:
+                dropped.append(col)
+        except Exception:
+            kept.append(col)
+    if dropped:
+        LOGGER.info(
+            "Dropped %d zero/constant variance feature(s) for training: %s",
+            len(dropped), dropped[:20] if len(dropped) > 20 else dropped
+        )
+    return kept
+
+
 def _prepare_xy(frame: pd.DataFrame, features: Sequence[str], encode_labels: bool = False) -> Tuple[np.ndarray, np.ndarray]:
     feature_cols = [col for col in features if col in frame.columns]
     X = frame[feature_cols].values.astype(np.float32)
@@ -956,6 +984,12 @@ def run_orchestrator(config: OrchestratorConfig) -> Dict[str, Any]:
         raise RuntimeError("No model families available. Install LightGBM/XGBoost/CatBoost or adjust flags.")
 
     feature_cols = [col for col in REQUIRED_FEATURE_COLUMNS if col in frame.columns]
+    feature_cols = _drop_zero_variance_features(frame, feature_cols)
+    if len(feature_cols) < 10:
+        raise RuntimeError(
+            f"Too few features after dropping constant columns ({len(feature_cols)}). "
+            "Check data and REQUIRED_FEATURE_COLUMNS."
+        )
     results: List[SegmentResult] = []
 
     for segment in segments:

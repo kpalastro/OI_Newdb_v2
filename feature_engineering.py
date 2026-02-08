@@ -729,8 +729,8 @@ def engineer_live_feature_set(
     
     # Feature 3: OI Concentration & Skewness
     features['oi_concentration_ratio'] = oi_concentration.get('oi_concentration_ratio', 0.0)
-    features['oi_concentration_top3_ce'] = 0.0  # Placeholder - can be enhanced
-    features['oi_concentration_top3_pe'] = 0.0  # Placeholder - can be enhanced
+    features['oi_concentration_top3_ce'] = oi_concentration.get('oi_concentration_top3_ce', 0.0)
+    features['oi_concentration_top3_pe'] = oi_concentration.get('oi_concentration_top3_pe', 0.0)
     features['oi_skewness'] = (oi_concentration.get('ce_skewness', 0.0) + oi_concentration.get('pe_skewness', 0.0)) / 2.0
     features['oi_skewness_ce'] = oi_concentration.get('ce_skewness', 0.0)
     features['oi_skewness_pe'] = oi_concentration.get('pe_skewness', 0.0)
@@ -2049,11 +2049,15 @@ def calculate_oi_concentration(
     Returns:
         Dict with keys:
         - oi_concentration_ratio: Ratio of top N strikes OI to total OI
+        - oi_concentration_top3_ce: Fraction of total CE OI in top N CE strikes (by OI)
+        - oi_concentration_top3_pe: Fraction of total PE OI in top N PE strikes (by OI)
         - ce_skewness: Skewness of call OI distribution
         - pe_skewness: Skewness of put OI distribution
     """
     result = {
         'oi_concentration_ratio': 0.0,
+        'oi_concentration_top3_ce': 0.0,
+        'oi_concentration_top3_pe': 0.0,
         'ce_skewness': 0.0,
         'pe_skewness': 0.0
     }
@@ -2082,6 +2086,29 @@ def calculate_oi_concentration(
     top_n_oi = sum(oi for _, oi in sorted_strikes[:top_n])
     result['oi_concentration_ratio'] = top_n_oi / total_oi if total_oi > 0 else 0.0
     
+    # Top N concentration for CE only (top N call strikes by OI)
+    if total_ce_oi > 0 and call_options:
+        ce_by_strike = {}
+        for opt in call_options:
+            s = opt.get('strike')
+            oi = opt.get('latest_oi', 0) or 0
+            if s is not None:
+                ce_by_strike[s] = ce_by_strike.get(s, 0) + oi
+        if ce_by_strike:
+            top_ce_oi = sum(oi for _, oi in sorted(ce_by_strike.items(), key=lambda x: x[1], reverse=True)[:top_n])
+            result['oi_concentration_top3_ce'] = top_ce_oi / total_ce_oi
+    # Top N concentration for PE only
+    if total_pe_oi > 0 and put_options:
+        pe_by_strike = {}
+        for opt in put_options:
+            s = opt.get('strike')
+            oi = opt.get('latest_oi', 0) or 0
+            if s is not None:
+                pe_by_strike[s] = pe_by_strike.get(s, 0) + oi
+        if pe_by_strike:
+            top_pe_oi = sum(oi for _, oi in sorted(pe_by_strike.items(), key=lambda x: x[1], reverse=True)[:top_n])
+            result['oi_concentration_top3_pe'] = top_pe_oi / total_pe_oi
+    
     # Calculate skewness for CE and PE OI distributions
     ce_oi_values = [opt.get('latest_oi', 0) or 0 for opt in call_options]
     pe_oi_values = [opt.get('latest_oi', 0) or 0 for opt in put_options]
@@ -2089,13 +2116,13 @@ def calculate_oi_concentration(
     if len(ce_oi_values) > 2:
         try:
             result['ce_skewness'] = float(skew(ce_oi_values))
-        except:
+        except Exception:
             result['ce_skewness'] = 0.0
     
     if len(pe_oi_values) > 2:
         try:
             result['pe_skewness'] = float(skew(pe_oi_values))
-        except:
+        except Exception:
             result['pe_skewness'] = 0.0
     
     return result
