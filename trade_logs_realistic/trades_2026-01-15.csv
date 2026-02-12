@@ -1,0 +1,4 @@
+entry_timestamp,exit_timestamp,exchange,position_id,symbol,type,side,quantity,entry_price,exit_price,pnl,entry_reason,exit_reason,status,confidence,kelly_fraction,constraint_violation,signal_id,pnl_source
+2026-01-15 00:00:29,2026-01-15 15:20:09,NSE,NSE_AUTO_0025,NIFTY26JAN25650CE,CE,BUY,65,227.22,227.45,14.95,Auto-lightgbm-LimitChase,End of Day Exit (15:20 IST),CLOSED,0.9834598898887634,0.309,False,NSE-1768415429629-2753,original
+2026-01-15 00:05:32,2026-01-15 15:20:10,NSE,NSE_AUTO_0026,NIFTY26JAN25650CE,CE,BUY,65,227.22,227.45,14.95,Auto-lightgbm-LimitChase,End of Day Exit (15:20 IST),CLOSED,0.9834598898887634,0.309,False,NSE-1768415732266-2773,original
+2026-01-15 00:10:36,2026-01-15 15:20:10,NSE,NSE_AUTO_0027,NIFTY26JAN25650CE,CE,BUY,65,227.22,227.45,14.95,Auto-lightgbm-LimitChase,End of Day Exit (15:20 IST),CLOSED,0.9834598898887634,0.309,False,NSE-1768416036433-2796,original

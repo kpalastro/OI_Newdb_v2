@@ -42,6 +42,7 @@ models/rl_*.zip
 *.swp
 *.swo
 *~
+*~lock*
 
 # OS
 .DS_Store
