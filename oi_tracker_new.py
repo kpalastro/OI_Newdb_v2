@@ -3901,8 +3901,13 @@ def monitor_positions(handler: ExchangeDataHandler, call_options: list, put_opti
                 if eod_exit_triggered:
                     exit_reason = "End of Day Exit (15:20 IST)"
                 # Priority 2: Regular target/stop loss rules
-                # SENSEX: 50 points, NIFTY: 25 points
-                target_points = 50 if handler.exchange == 'BSE' else 25
+                # Trending: NSE 25 pts, BSE 50 pts. Non-trending (volume compressed / range-bound): NSE 12 pts, BSE 30 pts
+                regime = (handler.ml_metadata.get('regime') or handler.ml_features.get('regime') or '').strip().upper()
+                is_non_trending = regime in ('RANGE_BOUND', 'LOW_VOL_COMPRESSION', 'LOW_VOL')
+                if is_non_trending:
+                    target_points = 30 if handler.exchange == 'BSE' else 12
+                else:
+                    target_points = 50 if handler.exchange == 'BSE' else 25
                 stop_loss_points = target_points  # Same as target for stop loss
                 
                 if pos['side'] == 'B':
