@@ -128,7 +128,7 @@ class AppConfig:
     walk_forward_test_days: int = field(default_factory=lambda: _get_env_int('OI_TRACKER_WALK_FORWARD_TEST_DAYS', 20))
     walk_forward_step_days: int = field(default_factory=lambda: _get_env_int('OI_TRACKER_WALK_FORWARD_STEP_DAYS', 10))
     ml_signal_cooldown_seconds: int = field(default_factory=lambda: _get_env_int('OI_TRACKER_ML_SIGNAL_COOLDOWN_SECONDS', 0))
-    min_confidence_for_trade: float = field(default_factory=lambda: _get_env_float('OI_TRACKER_MIN_CONFIDENCE_FOR_TRADE', 0.60))
+    min_confidence_for_trade: float = field(default_factory=lambda: _get_env_float('OI_TRACKER_MIN_CONFIDENCE_FOR_TRADE', 0.51))
     auto_exec_enabled: bool = field(default_factory=lambda: _get_env_bool('OI_TRACKER_AUTO_EXEC_ENABLED', True))
     auto_exec_min_kelly_fraction: float = field(default_factory=lambda: _get_env_float('OI_TRACKER_AUTO_EXEC_MIN_KELLY_FRACTION', 0.2))
     auto_exec_max_position_size_lots: int = field(default_factory=lambda: _get_env_int('OI_TRACKER_AUTO_EXEC_MAX_POSITION_SIZE_LOTS', 4))
