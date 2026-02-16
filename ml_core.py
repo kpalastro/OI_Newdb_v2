@@ -27,6 +27,11 @@ from feature_engineering import REQUIRED_FEATURE_COLUMNS
 
 SIGNAL_MAP = {-1: 'SELL', 0: 'HOLD', 1: 'BUY'}
 
+# Overconfidence cap: trade-log analysis showed very high confidence (>=0.9) has ~57% loss rate.
+# Scale down position size when confidence exceeds threshold to reduce overconfident trade size.
+OVERCONFIDENCE_THRESHOLD = 0.9
+OVERCONFIDENCE_SIZE_SCALE = 0.7  # Multiply kelly_fraction and recommended_lots by this when overconfident
+
 
 class MLSignalGenerator:
     """
@@ -170,6 +175,7 @@ class MLSignalGenerator:
 
             # 5. Risk Sizing
             risk_payload = {'fraction': 0.0, 'recommended_lots': 0, 'kelly_fraction': 0.0}
+            overconfidence_cap_applied = False
             if signal != 'HOLD':
                 current_vol = float(features_dict.get('vix', 20.0)) / 100.0
                 
@@ -181,6 +187,20 @@ class MLSignalGenerator:
                     regime_risk_scale=regime_config['risk_scale'] # Phase 5 Scaling
                 )
 
+                # Overconfidence cap: reduce position size when confidence >= threshold
+                # (trade-log analysis: very high confidence had ~57% loss rate)
+                if confidence >= OVERCONFIDENCE_THRESHOLD:
+                    overconfidence_cap_applied = True
+                    risk_payload = {
+                        **risk_payload,
+                        'fraction': round(risk_payload.get('fraction', 0.0) * OVERCONFIDENCE_SIZE_SCALE, 4),
+                        'kelly_fraction': round(risk_payload.get('kelly_fraction', 0.0) * OVERCONFIDENCE_SIZE_SCALE, 4),
+                        'recommended_lots': max(0, int(risk_payload.get('recommended_lots', 0) * OVERCONFIDENCE_SIZE_SCALE)),
+                    }
+                    # Ensure at least 1 lot if we had a non-zero recommendation (floor after scale)
+                    if risk_payload.get('recommended_lots', 0) == 0 and risk_payload.get('kelly_fraction', 0) > 0:
+                        risk_payload['recommended_lots'] = 1
+
             metadata = {
                 'regime': current_regime,
                 'horizon': horizon,
@@ -191,6 +211,7 @@ class MLSignalGenerator:
                 'recommended_lots': risk_payload.get('recommended_lots', 0),
                 'confidence': confidence,
                 'regime_risk_scale': regime_config['risk_scale'],
+                'overconfidence_cap_applied': overconfidence_cap_applied,
                 'rolling_accuracy': self._rolling_accuracy(),
                 'last_feedback_at': self.last_feedback_timestamp.isoformat() if self.last_feedback_timestamp else None,
             }

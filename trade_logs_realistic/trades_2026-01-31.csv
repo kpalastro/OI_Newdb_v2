@@ -1,0 +1,3 @@
+entry_timestamp,exit_timestamp,exchange,position_id,symbol,type,side,quantity,entry_price,exit_price,pnl,entry_reason,exit_reason,status,confidence,kelly_fraction,constraint_violation,signal_id,pnl_source
+2026-01-31 10:02:44,2026-01-31 15:27:04,BSE,BSE_AUTO_0039,SENSEX2620582500PE,PE,BUY,20,734.7,734.7,0.0,Auto-lightgbm-LimitChase,Signal Flip (SELL → BUY),CLOSED,0.6289926087203053,0.309,False,BSE-1769833964782-3404,db_snapshot
+2026-01-31 10:08:02,2026-01-31 15:27:05,BSE,BSE_AUTO_0040,SENSEX2620582500PE,PE,BUY,20,734.7,734.7,0.0,Auto-lightgbm-LimitChase,Signal Flip (SELL → BUY),CLOSED,0.6069782739784083,0.309,False,BSE-1769834282013-3415,db_snapshot

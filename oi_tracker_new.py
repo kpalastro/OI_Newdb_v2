@@ -1737,6 +1737,25 @@ def feature_result_consumer():
                                 if realtime_ltp is not None:
                                     current_price = float(realtime_ltp)
 
+                                # Use fresh LTP from Kite websocket at execution time (fix stale snapshot entry price)
+                                token = None
+                                for opt in (result.calls or []) + (result.puts or []):
+                                    if opt.get('symbol') == symbol:
+                                        token = opt.get('token')
+                                        break
+                                if token is not None:
+                                    with handler.lock:
+                                        tick = handler.latest_tick_data.get(token, {})
+                                    fresh_ltp = normalize_price(tick.get('last_price')) if tick else None
+                                    if fresh_ltp is not None:
+                                        try:
+                                            current_price = float(fresh_ltp)
+                                            logging.debug(
+                                                f"[{result.exchange}] Using fresh LTP for {symbol}: {current_price:.2f} (was snapshot)"
+                                            )
+                                        except (TypeError, ValueError):
+                                            pass
+
                                 # Build unified strategy signal
                                 strategy_signal = StrategySignal(
                                     signal=result.ml_signal,
@@ -2712,14 +2731,18 @@ def get_trade_log_filename() -> Path:
     return TRADE_LOG_DIR / f"trades_{today_ist():%Y-%m-%d}.csv"
 
 def _perform_log_trade_entry(position: dict):
-    """Log new trade entry to CSV. Uses position's entry_time for realistic buy timestamp."""
+    """Log new trade entry to CSV. Uses entry time from position (when trade was opened), not I/O write time."""
     try:
         filepath = get_trade_log_filename()
         # Extract entry_reason, defaulting to 'Manual' if not present
         entry_reason = position.get('entry_reason', 'Manual')
-        # Use position's entry_time (set at execution) for realistic buy recording
-        entry_ts = position.get('entry_time') or now_ist().strftime('%Y-%m-%d %H:%M:%S')
-        
+        # Use actual entry time from position (set at open), not when this I/O runs
+        entry_ts = position.get('entry_timestamp') or position.get('entry_time')
+        if not entry_ts:
+            entry_ts = now_ist().strftime('%Y-%m-%d %H:%M:%S')
+        elif hasattr(entry_ts, 'strftime'):
+            entry_ts = entry_ts.strftime('%Y-%m-%d %H:%M:%S')
+
         log_entry = {
             'entry_timestamp': entry_ts,
             'exit_timestamp': None,
@@ -2751,15 +2774,17 @@ def _perform_log_trade_entry(position: dict):
 def _perform_log_trade_exit(position_id: str, exit_reason: str,
                            exit_price: float, realized_pnl: float,
                            exit_timestamp: Optional[str] = None):
-    """Update trade log with exit details. Uses provided exit_timestamp for realistic sell recording."""
+    """Update trade log with exit details. Uses exit_timestamp from close time if provided."""
     try:
         filepath = get_trade_log_filename()
         if not filepath.exists():
             return
-        
-        # Use provided exit time (moment of close) for realistic sell recording
-        exit_ts = exit_timestamp or now_ist().strftime('%Y-%m-%d %H:%M:%S')
-        
+
+        if not exit_timestamp:
+            exit_timestamp = now_ist().strftime('%Y-%m-%d %H:%M:%S')
+        elif hasattr(exit_timestamp, 'strftime'):
+            exit_timestamp = exit_timestamp.strftime('%Y-%m-%d %H:%M:%S')
+
         with trade_log_lock:
             # Use pandas for robust CSV handling
             try:
@@ -2774,13 +2799,13 @@ def _perform_log_trade_exit(position_id: str, exit_reason: str,
                 logging.warning(f"Position {position_id} not found in trade log for exit update")
                 return
             
-            # Update the row
+            # Update the row (use actual exit time from when position was closed, not I/O write time)
             df.loc[mask, 'status'] = 'CLOSED'
             df.loc[mask, 'exit_reason'] = exit_reason
             df.loc[mask, 'exit_price'] = round(exit_price, 2)
             df.loc[mask, 'pnl'] = round(realized_pnl, 2)
-            df.loc[mask, 'exit_timestamp'] = exit_ts
-            
+            df.loc[mask, 'exit_timestamp'] = exit_timestamp
+
             # Ensure all required columns exist (for backward compatibility with old CSV files)
             for col in TRADE_LOG_COLUMNS:
                 if col not in df.columns:
@@ -2863,14 +2888,14 @@ def schedule_log_trade_entry(position: dict):
 
 def schedule_log_trade_exit(position_id: str, exit_reason: str, exit_price: float, realized_pnl: float,
                             exit_timestamp: Optional[str] = None):
-    """Schedule trade exit logging. Pass exit_timestamp for realistic sell recording."""
+    """Schedule trade exit logging. Pass exit_timestamp (IST string) from close time so log reflects actual exit time."""
     payload = {
         'position_id': position_id,
         'exit_reason': exit_reason,
         'exit_price': exit_price,
         'realized_pnl': realized_pnl,
         'exit_timestamp': exit_timestamp,
-        }
+    }
     io_queue.put(('log_trade_exit', payload))
 
 # ==============================================================================
@@ -3847,6 +3872,29 @@ def _select_auto_trade_contract(
 # --- PAPER TRADING & POSITION MANAGEMENT ---
 # ==============================================================================
 
+def _get_realtime_ltp_for_option(handler: ExchangeDataHandler, opt: dict) -> Optional[float]:
+    """Get realtime LTP for an option from latest tick or price cache, else option chain LTP."""
+    token = opt.get('token')
+    if token is not None:
+        tick = handler.latest_tick_data.get(token, {})
+        ltp = normalize_price(tick.get('last_price')) if tick else None
+        if ltp is not None:
+            return float(ltp)
+        cached = handler.option_price_cache.get(token)
+        if cached is not None:
+            try:
+                return float(cached)
+            except (TypeError, ValueError):
+                pass
+    ltp = opt.get('ltp')
+    if ltp is not None:
+        try:
+            return float(ltp)
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
 def monitor_positions(handler: ExchangeDataHandler, call_options: list, put_options: list,
                      monthly_handler: Optional[ExchangeDataHandler] = None):
     """Monitor and auto-close positions based on rules.
@@ -3872,10 +3920,16 @@ def monitor_positions(handler: ExchangeDataHandler, call_options: list, put_opti
         if current_time.weekday() < 5 and current_time >= eod_exit_time:
             eod_exit_triggered = True
     
-        # For all exchanges, use weekly expiry prices
-        # NSE now uses weekly expiry contracts (changed from monthly)
-        price_map = {opt['symbol']: opt.get('ltp') for opt in call_options + put_options 
-                    if opt.get('ltp') is not None}
+        # Build price_map from realtime LTP (tick/cache) so exit price in trade log is actual market price at exit
+        all_opts = call_options + put_options
+        price_map = {}
+        for opt in all_opts:
+            symbol = opt.get('symbol')
+            if not symbol:
+                continue
+            ltp = _get_realtime_ltp_for_option(handler, opt)
+            if ltp is not None:
+                price_map[symbol] = ltp
         
         positions_to_close = []
         cumulative_mtm = 0.0
@@ -3913,8 +3967,13 @@ def monitor_positions(handler: ExchangeDataHandler, call_options: list, put_opti
                 if eod_exit_triggered:
                     exit_reason = "End of Day Exit (15:20 IST)"
                 # Priority 2: Regular target/stop loss rules
-                # SENSEX: 50 points, NIFTY: 25 points
-                target_points = 50 if handler.exchange == 'BSE' else 25
+                # Trending: NSE 25 pts, BSE 50 pts. Non-trending (volume compressed / range-bound): NSE 12 pts, BSE 30 pts
+                regime = (handler.ml_metadata.get('regime') or handler.ml_features.get('regime') or '').strip().upper()
+                is_non_trending = regime in ('RANGE_BOUND', 'LOW_VOL_COMPRESSION', 'LOW_VOL')
+                if is_non_trending:
+                    target_points = 30 if handler.exchange == 'BSE' else 12
+                else:
+                    target_points = 50 if handler.exchange == 'BSE' else 25
                 stop_loss_points = target_points  # Same as target for stop loss
                 
                 if pos['side'] == 'B':
@@ -3986,13 +4045,16 @@ def _exit_conflicting_positions_on_signal_flip(
     try:
         current_time = now_ist()
 
-        # Build a price map using weekly expiry prices
-        # NSE now uses weekly expiry contracts (changed from monthly)
-        price_map = {
-            opt['symbol']: opt.get('ltp')
-            for opt in call_options + put_options
-            if opt.get('ltp') is not None
-        }
+        # Build price map from realtime LTP (tick/cache) so exit price in trade log is actual market price at exit
+        all_opts = call_options + put_options
+        price_map = {}
+        for opt in all_opts:
+            symbol = opt.get('symbol')
+            if not symbol:
+                continue
+            ltp = _get_realtime_ltp_for_option(handler, opt)
+            if ltp is not None:
+                price_map[symbol] = ltp
 
         positions_to_close: List[Tuple] = []
 
@@ -4075,8 +4137,10 @@ def close_position(handler: ExchangeDataHandler, pos_id: str, exit_reason: str,
             
             position = handler.open_positions.pop(pos_id)
             handler.closed_positions_pnl += realized_pnl
-        
-        # Log exit to trade logs with real-time exit price and timestamp
+
+        # Capture exit time at close (so log shows actual exit time, not when I/O runs)
+        exit_ts = now_ist().strftime('%Y-%m-%d %H:%M:%S')
+        # Log exit to trade logs
         schedule_log_trade_exit(pos_id, exit_reason, exit_price, realized_pnl, exit_timestamp=exit_ts)
 
         # Record Phase 2 paper trading metrics for realised PnL

@@ -51,7 +51,7 @@ def main() -> None:
     parser.add_argument("--holding-period", type=int, default=15, help="Holding window in minutes.")
     parser.add_argument("--cost-bps", type=float, default=2.0, help="Transaction cost in basis points.")
     parser.add_argument("--slippage-bps", type=float, default=1.0, help="Slippage in basis points.")
-    parser.add_argument("--min-confidence", type=float, default=0.55, help="Minimum ML confidence to trade.")
+    parser.add_argument("--min-confidence", type=float, default=0.6, help="Minimum ML confidence to trade.")
     parser.add_argument("--max-trades", type=int, default=None, help="Upper bound on number of trades.")
     parser.add_argument("--account-size", type=float, default=1_000_000.0, help="Account notional in INR.")
     parser.add_argument("--margin-per-lot", type=float, default=75_000.0, help="Margin per index lot.")
@@ -89,6 +89,33 @@ def main() -> None:
                      result.metrics.get("num_trades", 0),
                      result.metrics.get("net_total_pnl", 0.0),
                      result.metrics.get("sharpe_ratio", float("nan")))
+
+    # Print daily summary: target hits vs stop losses, total profit per day
+    daily = getattr(result, "daily_summary", None) or []
+    if daily:
+        logging.info("")
+        logging.info("=== Daily summary (Target hits vs Stop losses, Total PnL) ===")
+        logging.info("%-12s | %6s | %8s | %10s | %8s | %14s | %14s",
+                     "Date", "Trades", "Target", "StopLoss", "Breakeven", "Total Net PnL", "Total Gross PnL")
+        logging.info("-" * 90)
+        for row in daily:
+            logging.info("%-12s | %6d | %8d | %10d | %8d | %14.2f | %14.2f",
+                         row.get("date", ""),
+                         row.get("num_trades", 0),
+                         row.get("target_hits", 0),
+                         row.get("stop_losses", 0),
+                         row.get("breakeven", 0),
+                         row.get("total_net_pnl", 0.0),
+                         row.get("total_gross_pnl", 0.0))
+        logging.info("-" * 90)
+        total_net = sum(r.get("total_net_pnl", 0) for r in daily)
+        total_trades = sum(r.get("num_trades", 0) for r in daily)
+        total_wins = sum(r.get("target_hits", 0) for r in daily)
+        total_losses = sum(r.get("stop_losses", 0) for r in daily)
+        total_be = sum(r.get("breakeven", 0) for r in daily)
+        logging.info("TOTAL        | %6d | %8d | %10d | %8d | %14.2f |",
+                     total_trades, total_wins, total_losses, total_be, total_net)
+        logging.info("")
 
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

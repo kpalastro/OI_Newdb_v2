@@ -1,0 +1,27 @@
+Exchange: NSE
+3m %% change in next* OI/volume (CE/PE) vs direction/swing
+oi_next_sentiment = nse_next_oi_change_put_total - nse_next_oi_change_call_total (DB); + = bearish, - = bullish
+
+pct_3m_nse_next_oi_call_total: mean=158.173%%, std=2135.862%%, n=8675
+pct_3m_nse_next_oi_put_total: mean=128.920%%, std=1082.891%%, n=8676
+pct_3m_nse_next_volume_call_total: mean=76.868%%, std=1103.813%%, n=8672
+pct_3m_nse_next_volume_put_total: mean=62.720%%, std=920.883%%, n=8673
+pct_3m_oi_diff_ce_pe: mean=29.246%%, std=1566.826%%, n=8675
+pct_3m_vol_diff_ce_pe: mean=15.955%%, std=1120.257%%, n=8670
+pct_3m_combined_oi_vol_diff_ce_pe: mean=23.940%%, std=1078.876%%, n=8670
+
+Alignment:
+  pct_3m_nse_next_oi_call_total: align_pct=53.0%%
+  pct_3m_nse_next_oi_put_total: align_pct=48.6%%
+  pct_3m_nse_next_volume_call_total: align_pct=45.9%%
+  pct_3m_nse_next_volume_put_total: align_pct=42.6%%
+
+CE vs PE diff (CE - PE):
+  pct_3m_oi_diff_ce_pe: mean=29.246%%, std=1566.826%%, n=8675
+  pct_3m_vol_diff_ce_pe: mean=15.955%%, std=1120.257%%, n=8670
+  pct_3m_combined_oi_vol_diff_ce_pe: mean=23.940%%, std=1078.876%%, n=8670
+  pct_3m_oi_diff_ce_pe: align_pct=55.7%%
+  pct_3m_vol_diff_ce_pe: align_pct=54.0%%
+  pct_3m_combined_oi_vol_diff_ce_pe: align_pct=54.3%%
+  oi_vol_agree_align: n=5548, align_pct=65.2%%
+  oi_vol_agree_strict_align: n=2701, align_pct=69.9%%

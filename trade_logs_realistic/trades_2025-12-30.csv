@@ -1,0 +1,4 @@
+entry_timestamp,exit_timestamp,exchange,position_id,symbol,type,side,quantity,entry_price,exit_price,pnl,entry_reason,exit_reason,status,confidence,kelly_fraction,constraint_violation,signal_id,pnl_source
+2025-12-30 09:16:32,2025-12-30 09:16:34,BSE,BSE_AUTO_0244,SENSEX2610184400CE,CE,BUY,20,549.085,407.45,-2832.7,Auto-lightgbm-LimitChase,Stop Loss (-50),CLOSED,0.9518141408470896,0.309,False,BSE-1767066392027-4304,original
+2025-12-30 09:21:20,2025-12-30 09:21:52,BSE,BSE_AUTO_0245,SENSEX2610184400CE,CE,BUY,20,434.735,380.0,-1094.7,Auto-lightgbm-LimitChase,Stop Loss (-50),CLOSED,0.9299579265543494,0.309,False,BSE-1767066680558-5077,original
+2025-12-30 09:27:36,2025-12-30 15:20:01,BSE,BSE_AUTO_0246,SENSEX2610184400CE,CE,BUY,20,390.835,365.8,-500.7,Auto-lightgbm-LimitChase,End of Day Exit (15:20 IST),CLOSED,0.8159884070638818,0.309,False,BSE-1767067056848-4342,original

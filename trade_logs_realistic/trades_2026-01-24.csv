@@ -1,0 +1,5 @@
+entry_timestamp,exit_timestamp,exchange,position_id,symbol,type,side,quantity,entry_price,exit_price,pnl,entry_reason,exit_reason,status,confidence,kelly_fraction,constraint_violation,signal_id,pnl_source
+2026-01-24 00:00:09,,NSE,NSE_AUTO_0004,NIFTY26JAN24950CE,CE,BUY,65,193.02,,,Auto-lightgbm-LimitChase,,OPEN,0.856353422546862,0.309,False,NSE-1769193009769-1365,original
+2026-01-24 00:00:22,,BSE,BSE_AUTO_0007,SENSEX26JAN81300CE,CE,BUY,20,757.92,,,Auto-lightgbm-LimitChase,,OPEN,0.7449226447769502,0.309,False,BSE-1769193022624-1178,original
+2026-01-24 00:05:22,,NSE,NSE_AUTO_0005,NIFTY26JAN24950CE,CE,BUY,65,193.02,,,Auto-lightgbm-LimitChase,,OPEN,0.856353422546862,0.309,False,NSE-1769193322408-1383,original
+2026-01-24 00:05:32,,BSE,BSE_AUTO_0008,SENSEX26JAN81300CE,CE,BUY,20,757.92,,,Auto-lightgbm-LimitChase,,OPEN,0.7020445087345943,0.309,False,BSE-1769193332688-1196,original

@@ -1,0 +1,4 @@
+entry_timestamp,exit_timestamp,exchange,position_id,symbol,type,side,quantity,entry_price,exit_price,pnl,entry_reason,exit_reason,status,confidence,kelly_fraction,constraint_violation,signal_id,pnl_source
+2025-12-26 09:27:02,2025-12-26 15:20:03,NSE,NSE_AUTO_0014,NIFTY25DEC26100PE,PE,BUY,75,76.235,92.4,1212.38,Auto-lightgbm-LimitChase,End of Day Exit (15:20 IST),CLOSED,0.7531090925786899,0.309,False,NSE-1766721422010-19217,original
+2025-12-26 09:32:07,2025-12-26 12:45:04,NSE,NSE_AUTO_0015,NIFTY25DEC26150PE,PE,BUY,75,90.485,117.8,2048.62,Auto-lightgbm-LimitChase,Target Hit (+25),CLOSED,0.7592055954730116,0.309,False,NSE-1766721727333-19240,original
+2025-12-26 13:14:56,2025-12-26 15:20:03,NSE,NSE_AUTO_0016,NIFTY25DEC26050PE,PE,BUY,75,65.085,65.1,1.13,Auto-lightgbm-LimitChase,End of Day Exit (15:20 IST),CLOSED,0.6487134105577633,0.309,False,NSE-1766735096493-20117,original
