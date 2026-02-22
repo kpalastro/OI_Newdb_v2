@@ -578,7 +578,7 @@ def train_regime_aware_model(
     return fold_metrics
 
 
-def _train_expiry_submodule(exchange: str, df_all: pd.DataFrame, lr: float = 0.001, epochs: int = 20):
+def _train_expiry_submodule(exchange: str, df_all: pd.DataFrame, lr: float = 0.001, epochs: int = 30):
     """
     Submodule to train the deep learning ExpiryDayTransformer using the loaded dataframe.
     """
@@ -755,26 +755,21 @@ def _train_expiry_submodule(exchange: str, df_all: pd.DataFrame, lr: float = 0.0
     print(f"DEBUG: Expiry submodule - Model saved to {save_path}")
 
 
-def final_training_run(exchange: str, df: pd.DataFrame, feature_cols: List[str]):
+def final_training_run(exchange: str, df: pd.DataFrame, feature_cols: List[str], model_subdir: Optional[str] = None):
     """
     Trains the final production model on ALL data.
     Saves artifacts for the live inference engine.
+    If model_subdir is set (e.g. 'zigzag_v2'), saves to models/{exchange}/{model_subdir}/.
     """
     logging.info("Training Final Production Models...")
     print("DEBUG: Final training - Training expiry submodule...")
-    
-    # 0. Train Expiry Submodule (Deep Learning)
-    # Skip expiry training for now - it's causing hangs and is not critical for main pipeline
-    # TODO: Debug and fix ExpiryDayTransformer forward pass issue
-    print("DEBUG: Final training - Skipping expiry submodule (known issue with transformer forward pass)")
-    logging.info("Skipping expiry submodule training (optional component)")
-    # try:
-    #     _train_expiry_submodule(exchange, df)
-    #     print("DEBUG: Final training - Expiry submodule complete.")
-    # except Exception as e:
-    #     print(f"DEBUG: Final training - Expiry submodule failed: {e}")
-    #     print("DEBUG: Final training - Continuing without expiry model...")
-    #     logging.warning(f"Expiry submodule training failed: {e}. Continuing without it.")
+    try:
+        _train_expiry_submodule(exchange, df)
+        print("DEBUG: Final training - Expiry submodule complete.")
+    except Exception as e:
+        print(f"DEBUG: Final training - Expiry submodule failed: {e}")
+        print("DEBUG: Final training - Continuing without expiry model...")
+        logging.warning(f"Expiry submodule training failed: {e}. Continuing without it.")
     
     # 1. Fit HMM on All Data
     print("DEBUG: Final training - Fitting HMM on all data (this may take 30-60 seconds)...")
@@ -814,6 +809,9 @@ def final_training_run(exchange: str, df: pd.DataFrame, feature_cols: List[str])
 
     # Log and persist global feature importances prior to selector thresholding
     model_dir = Path('models') / exchange
+    if model_subdir:
+        model_dir = model_dir / model_subdir
+    model_dir.mkdir(parents=True, exist_ok=True)
     feature_importance_path = model_dir / 'feature_importance.json'
     _log_feature_importance(
         base_model,
@@ -887,8 +885,9 @@ def final_training_run(exchange: str, df: pd.DataFrame, feature_cols: List[str])
 
     # Save Artifacts
     print("DEBUG: Final training - Saving model artifacts...")
-    model_dir = Path('models') / exchange
-    model_dir.mkdir(parents=True, exist_ok=True)
+    if not model_subdir:
+        model_dir = Path('models') / exchange
+        model_dir.mkdir(parents=True, exist_ok=True)
     
     # Save the internal HMM model from our transformer wrapper
     hmm_model_path = model_dir / 'hmm_regime_model.pkl'

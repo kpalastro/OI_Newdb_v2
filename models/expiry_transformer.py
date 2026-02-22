@@ -50,11 +50,15 @@ class ExpiryDayTransformer(nn.Module if torch else object):
                If (batch, feature_dim), we unsqueeze to (batch, 1, feature_dim) to treat as seq len 1.
         """
         if x.dim() == 2:
-            x = x.unsqueeze(1) # (batch, 1, feature_dim)
-            
+            x = x.unsqueeze(1)  # (batch, 1, feature_dim)
+        # Avoid seq_len=1: TransformerEncoder can hang/fail with sequence length 1 in some setups.
+        # Repeat the single step so we have at least 2; mean-pooling below is unchanged.
+        if x.size(1) == 1:
+            x = x.repeat(1, 2, 1)  # (batch, 2, feature_dim)
+
         # Embedding
-        emb = self.embedding(x) # (batch, seq, d_model)
-        
+        emb = self.embedding(x)  # (batch, seq, d_model)
+
         # Transformer
         encoded = self.transformer_encoder(emb)
         
